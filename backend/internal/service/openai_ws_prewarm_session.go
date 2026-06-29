@@ -186,21 +186,16 @@ func (s *OpenAIGatewayService) performOpenAIWSPrewarmSession(
 		return "", errors.New("prewarm session: no response_id in upstream events")
 	}
 
-	// 双向绑定：response_id → account（按每个 group 绑定，供续接路由）+ (account,model) → response_id（供注入）。
+	// 仅做反向绑定：response_id → account（按每个 group 绑定，供续接路由 + pop 时反向校验）。
+	// 注意：不再在此写 (account,model)→id 的单槽位绑定——id 的归属由调用方决定：
+	//   - worker：把 id 压入 pool；
+	//   - 请求兜底(ensure...)：直接返回给本次请求使用，不入池(避免一次性 id 被二次取用)。
 	ttl := s.openAIPrewarmSessionTTL()
+	_ = prewarmStore // 保留引用，避免下游签名变动；池写入由调用方负责。
 	for _, gid := range effectiveOpenAIPrewarmGroupIDs(groupIDs) {
 		logOpenAIWSBindResponseAccountWarn(gid, account.ID, prewarmResponseID, stateStore.BindResponseAccount(ctx, gid, prewarmResponseID, account.ID, ttl))
 	}
 	stateStore.BindResponseConn(prewarmResponseID, lease.ConnID(), ttl)
-	if err := prewarmStore.SetPrewarmSession(ctx, account.ID, normalizedModel, prewarmResponseID, ttl); err != nil {
-		logOpenAIWSModeInfo(
-			"prewarm_session_persist_fail account_id=%d conn_id=%s model=%s response_id=%s cause=%s",
-			account.ID, connID, normalizedModel,
-			truncateOpenAIWSLogValue(prewarmResponseID, openAIWSIDValueMaxLen),
-			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
-		)
-		return "", err
-	}
 
 	logOpenAIWSModeInfo(
 		"prewarm_session_done account_id=%d conn_id=%s model=%s response_id=%s events=%d terminal_events=%d duration_ms=%d",
@@ -297,6 +292,80 @@ func (s *OpenAIGatewayService) ensureOpenAIPrewarmSessionForRequest(
 	return id, true
 }
 
+// openAIPrewarmPoolTargetDepth 返回某账号 prewarm id 池的目标深度。
+// 每个并发请求需要一个独立 id，故目标深度 = 账号并发上限（下限 1）。
+func openAIPrewarmPoolTargetDepth(account *Account) int {
+	if account == nil {
+		return 1
+	}
+	t := account.Concurrency
+	if t < 1 {
+		t = 1
+	}
+	return t
+}
+
+// openAIPrewarmPoolMaxDepth 返回池的硬上限（给 roll-update 回填留余量，减少 worker 现铸）。
+func openAIPrewarmPoolMaxDepth(account *Account) int {
+	t := openAIPrewarmPoolTargetDepth(account)
+	max := t * 2
+	if max < 4 {
+		max = 4
+	}
+	return max
+}
+
+// refillOpenAIPrewarmPool 把 (account, model) 的 id 池补足到目标深度：
+// 铸造 (target-当前深度) 个独立 id 并压入池。worker 周期调用。
+func (s *OpenAIGatewayService) refillOpenAIPrewarmPool(ctx context.Context, account *Account, model string) {
+	if s == nil || account == nil {
+		return
+	}
+	store := s.getOpenAIPrewarmSessionStore()
+	if store == nil {
+		return
+	}
+	normalizedModel := normalizeOpenAIPrewarmModelKey(model)
+	if normalizedModel == "" {
+		return
+	}
+	target := openAIPrewarmPoolTargetDepth(account)
+	curLen, err := store.PrewarmSessionPoolLen(ctx, account.ID, normalizedModel)
+	if err != nil {
+		return
+	}
+	need := target - curLen
+	if need <= 0 {
+		return
+	}
+	ttl := s.openAIPrewarmSessionTTL()
+	maxDepth := openAIPrewarmPoolMaxDepth(account)
+	for i := 0; i < need; i++ {
+		if ctx.Err() != nil {
+			return
+		}
+		id, mintErr := s.performOpenAIWSPrewarmSession(ctx, account.GroupIDs, account, normalizedModel)
+		if mintErr != nil || strings.TrimSpace(id) == "" {
+			return
+		}
+		if pushErr := store.PushPrewarmSessionPool(ctx, account.ID, normalizedModel, id, maxDepth, ttl); pushErr != nil {
+			return
+		}
+	}
+}
+
+// recycleOpenAIPrewarmPoolID 在续接成功后把滚动出的新 id 压回池，供后续请求复用（稳态自维持）。
+func (s *OpenAIGatewayService) recycleOpenAIPrewarmPoolID(ctx context.Context, account *Account, model, responseID string) {
+	if s == nil || account == nil {
+		return
+	}
+	store := s.getOpenAIPrewarmSessionStore()
+	if store == nil {
+		return
+	}
+	_ = store.PushPrewarmSessionPool(ctx, account.ID, model, responseID, openAIPrewarmPoolMaxDepth(account), s.openAIPrewarmSessionTTL())
+}
+
 // resolveOpenAIPrewarmToken 解析账号的上游 token（OAuth 优先 TokenProvider 缓存）。
 func (s *OpenAIGatewayService) resolveOpenAIPrewarmToken(ctx context.Context, account *Account) (string, error) {
 	if account == nil {
@@ -368,20 +437,23 @@ func (s *OpenAIGatewayService) tryGetOpenAIPrewarmSession(
 	if normalizedModel == "" {
 		return "", false
 	}
-	// claim-on-read：原子取走缓存 id。prewarm id 一次性消费，并发请求绝不能复用同一个，
-	// 否则只有一个能续接、其余全部 previous_response_not_found。取不到的请求会各自铸造独立 id。
-	prewarmID, ok, err := prewarmStore.ClaimPrewarmSession(ctx, account.ID, normalizedModel)
-	if err != nil || !ok || strings.TrimSpace(prewarmID) == "" {
-		return "", false
+	// 从 id 池弹出一个独立 id（LPOP，原子）。prewarm id 一次性消费，每个并发请求拿到不同 id，
+	// 从根本上杜绝复用导致的 previous_response_not_found。池空则未命中，调用方各自铸造独立 id。
+	// 池内 id 可能有少量陈旧/跨账号项，最多重试几次反向校验后再放弃。
+	for attempt := 0; attempt < 4; attempt++ {
+		prewarmID, ok, err := prewarmStore.PopPrewarmSessionPool(ctx, account.ID, normalizedModel)
+		if err != nil || !ok || strings.TrimSpace(prewarmID) == "" {
+			return "", false
+		}
+		// 反向验证：该 response_id 必须仍路由回本账号。
+		boundAccountID, verr := stateStore.GetResponseAccount(ctx, groupID, prewarmID)
+		if verr != nil || boundAccountID != account.ID {
+			// 陈旧/跨账号项：丢弃，继续取下一个。
+			continue
+		}
+		return prewarmID, true
 	}
-	// 反向验证：该 response_id 必须仍路由回本账号。
-	boundAccountID, err := stateStore.GetResponseAccount(ctx, groupID, prewarmID)
-	if err != nil || boundAccountID != account.ID {
-		// 绑定陈旧/跨账号串，清理掉避免后续重复命中。
-		_ = prewarmStore.DeletePrewarmSession(ctx, account.ID, normalizedModel)
-		return "", false
-	}
-	return prewarmID, true
+	return "", false
 }
 
 // invalidateOpenAIPrewarmSession 删除 (accountID, model) 的预热绑定，

@@ -12,6 +12,7 @@ import (
 // fakePrewarmSessionCache 是 OpenAIPrewarmSessionCache 的内存实现，用于单测。
 type fakePrewarmSessionCache struct {
 	data map[string]fakePrewarmEntry
+	pool map[string][]string
 	err  error
 }
 type fakePrewarmEntry struct {
@@ -21,7 +22,7 @@ type fakePrewarmEntry struct {
 }
 
 func newFakePrewarmSessionCache() *fakePrewarmSessionCache {
-	return &fakePrewarmSessionCache{data: make(map[string]fakePrewarmEntry)}
+	return &fakePrewarmSessionCache{data: make(map[string]fakePrewarmEntry), pool: make(map[string][]string)}
 }
 
 func (c *fakePrewarmSessionCache) SetPrewarmSession(_ context.Context, key, value string, ttl time.Duration) error {
@@ -67,6 +68,40 @@ func (c *fakePrewarmSessionCache) ClaimPrewarmSession(ctx context.Context, key s
 func (c *fakePrewarmSessionCache) DeletePrewarmSession(_ context.Context, key string) error {
 	delete(c.data, key)
 	return nil
+}
+
+func (c *fakePrewarmSessionCache) PushPrewarmPool(_ context.Context, key, value string, maxDepth int, ttl time.Duration) error {
+	if c.err != nil {
+		return c.err
+	}
+	if maxDepth <= 0 {
+		maxDepth = 1
+	}
+	c.pool[key] = append(c.pool[key], value)
+	if n := len(c.pool[key]); n > maxDepth {
+		c.pool[key] = c.pool[key][n-maxDepth:]
+	}
+	return nil
+}
+
+func (c *fakePrewarmSessionCache) PopPrewarmPool(_ context.Context, key string) (string, error) {
+	if c.err != nil {
+		return "", c.err
+	}
+	q := c.pool[key]
+	if len(q) == 0 {
+		return "", nil
+	}
+	v := q[0]
+	c.pool[key] = q[1:]
+	return v, nil
+}
+
+func (c *fakePrewarmSessionCache) PrewarmPoolLen(_ context.Context, key string) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
+	return len(c.pool[key]), nil
 }
 
 func TestPrewarmSessionStore_SetGetDelete(t *testing.T) {

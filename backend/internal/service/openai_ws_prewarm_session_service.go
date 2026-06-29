@@ -164,7 +164,7 @@ func (s *OpenAIWSPrewarmSessionService) runOnce() {
 	for i := range candidates {
 		account := candidates[i]
 		for _, model := range s.models {
-			// 已存在新鲜绑定的跳过，避免重复预热。
+			// 池已满(达到目标深度)的跳过，避免重复预热。
 			if s.shouldSkipPrewarm(ctx, account, model) {
 				continue
 			}
@@ -173,26 +173,25 @@ func (s *OpenAIWSPrewarmSessionService) runOnce() {
 			go func(acc *Account, mdl string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				prewarmCtx, prewarmCancel := context.WithTimeout(ctx, 60*time.Second)
+				// 池补足可能要铸造多个 id，给足时间预算。
+				prewarmCtx, prewarmCancel := context.WithTimeout(ctx, 120*time.Second)
 				defer prewarmCancel()
-				if _, err := s.gw.performOpenAIWSPrewarmSessionDedup(prewarmCtx, acc.GroupIDs, acc, mdl); err != nil {
-					log.Printf("[OpenAIPrewarmSession] prewarm failed account_id=%d model=%s cause=%v", acc.ID, normalizeOpenAIPrewarmModelKey(mdl), err)
-				}
+				s.gw.refillOpenAIPrewarmPool(prewarmCtx, acc, mdl)
 			}(account, model)
 		}
 	}
 	wg.Wait()
 }
 
-// shouldSkipPrewarm 判断 (account, model) 是否已有足够新鲜的预热绑定，命中则跳过本次预热。
+// shouldSkipPrewarm 判断 (account, model) 的 id 池是否已达目标深度，已满则跳过本次补池。
 func (s *OpenAIWSPrewarmSessionService) shouldSkipPrewarm(ctx context.Context, account *Account, model string) bool {
 	store := s.gw.getOpenAIPrewarmSessionStore()
 	if store == nil || account == nil {
 		return false
 	}
-	_, freshness, ok, err := store.GetPrewarmSessionWithFreshness(ctx, account.ID, normalizeOpenAIPrewarmModelKey(model))
-	if err != nil || !ok {
+	curLen, err := store.PrewarmSessionPoolLen(ctx, account.ID, normalizeOpenAIPrewarmModelKey(model))
+	if err != nil {
 		return false
 	}
-	return freshness >= openAIWSPrewarmSessionStaleRatio
+	return curLen >= openAIPrewarmPoolTargetDepth(account)
 }

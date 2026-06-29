@@ -15,6 +15,8 @@ const (
 	// openAIWSPrewarmSessionCachePrefix 为 Redis 中 prewarm session 绑定的 key 前缀。
 	// 完整 key 形如 openai:prewarm:session:{accountID}:{modelHash}。
 	openAIWSPrewarmSessionCachePrefix = "openai:prewarm:session:"
+	// openAIWSPrewarmPoolCachePrefix 为 prewarm id 池(LIST)的 key 前缀。
+	openAIWSPrewarmPoolCachePrefix = "openai:prewarm:pool:"
 	// openAIWSPrewarmSessionRedisTimeout 限制 Redis 读写时间，避免拖慢请求主路径。
 	openAIWSPrewarmSessionRedisTimeout = 3 * time.Second
 	// openAIWSPrewarmSessionStaleRatio 快过期阈值：剩余 TTL 低于总 TTL 的该比例即视为需要刷新。
@@ -45,6 +47,16 @@ type OpenAIWSPrewarmSessionStore interface {
 	// prewarm id 是一次性消费(store=false)，必须 claim-on-read：并发请求中只有一个能拿到缓存 id，
 	// 其余返回未命中并各自铸造独立 id，从根本上避免多个请求复用同一个 id 导致 previous_response_not_found。
 	ClaimPrewarmSession(ctx context.Context, accountID int64, model string) (string, bool, error)
+
+	// --- prewarm id 池(LIST)：每个并发请求弹出一个独立 id，续接成功后把滚动出的新 id 压回池，
+	// 稳态下池自维持，把每请求握手数从 2(预热+正式)降到 ~1(正式)。 ---
+
+	// PushPrewarmSessionPool 把一个 prewarm response_id 压入 (accountID, model) 的池，裁剪到 maxDepth。
+	PushPrewarmSessionPool(ctx context.Context, accountID int64, model, responseID string, maxDepth int, ttl time.Duration) error
+	// PopPrewarmSessionPool 从 (accountID, model) 的池弹出一个 response_id；池空返回 ("", false, nil)。
+	PopPrewarmSessionPool(ctx context.Context, accountID int64, model string) (string, bool, error)
+	// PrewarmSessionPoolLen 返回 (accountID, model) 池的当前深度（worker 用于补足到目标深度）。
+	PrewarmSessionPoolLen(ctx context.Context, accountID int64, model string) (int, error)
 	// GetPrewarmSessionWithFreshness 读取并返回新鲜度比例(剩余/总，0~1)；未命中返回 false。
 	// worker 用它判断是否需要刷新（剩余比例 < openAIWSPrewarmSessionStaleRatio 时刷新）。
 	GetPrewarmSessionWithFreshness(ctx context.Context, accountID int64, model string) (responseID string, freshness float64, ok bool, err error)
@@ -60,6 +72,11 @@ type OpenAIPrewarmSessionCache interface {
 	// ClaimPrewarmSession 原子读取并删除 key（Redis GETDEL）；不存在返回 ("", nil)。
 	ClaimPrewarmSession(ctx context.Context, key string) (value string, err error)
 	DeletePrewarmSession(ctx context.Context, key string) error
+
+	// prewarm id 池(LIST)操作。
+	PushPrewarmPool(ctx context.Context, key, value string, maxDepth int, ttl time.Duration) error
+	PopPrewarmPool(ctx context.Context, key string) (value string, err error)
+	PrewarmPoolLen(ctx context.Context, key string) (int, error)
 }
 
 // defaultOpenAIWSPrewarmSessionStore 是基于 OpenAIPrewarmSessionCache 的默认实现。
@@ -153,6 +170,42 @@ func (s *defaultOpenAIWSPrewarmSessionStore) ClaimPrewarmSession(ctx context.Con
 	return value.ResponseID, true, nil
 }
 
+func (s *defaultOpenAIWSPrewarmSessionStore) PushPrewarmSessionPool(ctx context.Context, accountID int64, model, responseID string, maxDepth int, ttl time.Duration) error {
+	id := strings.TrimSpace(responseID)
+	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" || id == "" {
+		return nil
+	}
+	ttl = normalizeOpenAIPrewarmTTL(ttl)
+	keyCtx, cancel := withOpenAIPrewarmSessionTimeout(ctx)
+	defer cancel()
+	return s.cache.PushPrewarmPool(keyCtx, openAIPrewarmPoolCacheKey(accountID, model), id, maxDepth, ttl)
+}
+
+func (s *defaultOpenAIWSPrewarmSessionStore) PopPrewarmSessionPool(ctx context.Context, accountID int64, model string) (string, bool, error) {
+	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" {
+		return "", false, nil
+	}
+	keyCtx, cancel := withOpenAIPrewarmSessionTimeout(ctx)
+	defer cancel()
+	id, err := s.cache.PopPrewarmPool(keyCtx, openAIPrewarmPoolCacheKey(accountID, model))
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return "", false, nil
+	}
+	return id, true, nil
+}
+
+func (s *defaultOpenAIWSPrewarmSessionStore) PrewarmSessionPoolLen(ctx context.Context, accountID int64, model string) (int, error) {
+	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" {
+		return 0, nil
+	}
+	keyCtx, cancel := withOpenAIPrewarmSessionTimeout(ctx)
+	defer cancel()
+	return s.cache.PrewarmPoolLen(keyCtx, openAIPrewarmPoolCacheKey(accountID, model))
+}
+
 func (s *defaultOpenAIWSPrewarmSessionStore) DeletePrewarmSession(ctx context.Context, accountID int64, model string) error {
 	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" {
 		return nil
@@ -174,6 +227,15 @@ func (noOpOpenAIWSPrewarmSessionStore) GetPrewarmSession(context.Context, int64,
 func (noOpOpenAIWSPrewarmSessionStore) ClaimPrewarmSession(context.Context, int64, string) (string, bool, error) {
 	return "", false, nil
 }
+func (noOpOpenAIWSPrewarmSessionStore) PushPrewarmSessionPool(context.Context, int64, string, string, int, time.Duration) error {
+	return nil
+}
+func (noOpOpenAIWSPrewarmSessionStore) PopPrewarmSessionPool(context.Context, int64, string) (string, bool, error) {
+	return "", false, nil
+}
+func (noOpOpenAIWSPrewarmSessionStore) PrewarmSessionPoolLen(context.Context, int64, string) (int, error) {
+	return 0, nil
+}
 func (noOpOpenAIWSPrewarmSessionStore) GetPrewarmSessionWithFreshness(context.Context, int64, string) (string, float64, bool, error) {
 	return "", 0, false, nil
 }
@@ -186,6 +248,13 @@ func openAIPrewarmSessionCacheKey(accountID int64, model string) string {
 	modelKey := normalizeOpenAIPrewarmModelKey(model)
 	sum := sha256.Sum256([]byte(modelKey))
 	return fmt.Sprintf("%s%d:%s", openAIWSPrewarmSessionCachePrefix, accountID, hex.EncodeToString(sum[:]))
+}
+
+// openAIPrewarmPoolCacheKey 构造 prewarm id 池(LIST)的 Redis key。
+func openAIPrewarmPoolCacheKey(accountID int64, model string) string {
+	modelKey := normalizeOpenAIPrewarmModelKey(model)
+	sum := sha256.Sum256([]byte(modelKey))
+	return fmt.Sprintf("%s%d:%s", openAIWSPrewarmPoolCachePrefix, accountID, hex.EncodeToString(sum[:]))
 }
 
 // normalizeOpenAIPrewarmModelKey 把模型名归一到 codex 上游真实型号，作为 prewarm 维度 key。

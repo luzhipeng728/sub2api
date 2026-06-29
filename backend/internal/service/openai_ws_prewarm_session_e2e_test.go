@@ -91,8 +91,8 @@ func TestPrewarmSession_E2E_Injection(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(0)
 
-	// 预置：store 已有该账号该模型(归一化后)的 prewarm_id，且 stateStore 的 response_id→account 绑定也指向本账号。
-	require.NoError(t, prewarmStore.SetPrewarmSession(ctx, account.ID, normModel, prewarmID, time.Hour))
+	// 预置：池中已有该账号该模型(归一化后)的 prewarm_id，且 stateStore 的 response_id→account 绑定也指向本账号。
+	require.NoError(t, prewarmStore.PushPrewarmSessionPool(ctx, account.ID, normModel, prewarmID, 8, time.Hour))
 	stateStore := svc.getOpenAIWSStateStore()
 	require.NotNil(t, stateStore)
 	require.NoError(t, stateStore.BindResponseAccount(ctx, groupID, prewarmID, account.ID, time.Hour))
@@ -170,21 +170,20 @@ func TestPrewarmSession_Invalidate_OnStaleBinding(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(0)
 
-	// 预置：store 有 prewarm_id，但 stateStore 的绑定指向「另一个账号」（模拟跨账号串/陈旧）。
-	require.NoError(t, prewarmStore.SetPrewarmSession(ctx, account.ID, "gpt-5.1", stalePrewarmID, time.Hour))
+	// 预置：池里有 prewarm_id，但 stateStore 的绑定指向「另一个账号」（模拟跨账号串/陈旧）。
+	require.NoError(t, prewarmStore.PushPrewarmSessionPool(ctx, account.ID, "gpt-5.1", stalePrewarmID, 8, time.Hour))
 	stateStore := svc.getOpenAIWSStateStore()
 	require.NoError(t, stateStore.BindResponseAccount(ctx, groupID, stalePrewarmID, 99999, time.Hour))
 
-	// 验证 tryGetOpenAIPrewarmSession 会因反向验证失败而清理绑定。
+	// 验证 tryGetOpenAIPrewarmSession 会因反向验证失败而丢弃该 id 返回不注入。
 	id, ok := svc.tryGetOpenAIPrewarmSession(ctx, groupID, account, "gpt-5.1")
 	require.False(t, ok, "反向验证失败时应返回不注入")
 	require.Equal(t, "", id)
 
-	// 断言：stale 绑定已被清理。
-	remaining, stillThere, err := prewarmStore.GetPrewarmSession(ctx, account.ID, "gpt-5.1")
+	// 断言：陈旧 id 已被 pop 丢弃，池为空。
+	poolLen, err := prewarmStore.PrewarmSessionPoolLen(ctx, account.ID, "gpt-5.1")
 	require.NoError(t, err)
-	require.False(t, stillThere, "失效的 prewarm 绑定应被清理")
-	require.Equal(t, "", remaining)
+	require.Equal(t, 0, poolLen, "失效的 prewarm id 应被 pop 丢弃")
 
 	// 正式请求应退化为「不带 previous_response_id 的普通请求」。
 	rec := httptest.NewRecorder()

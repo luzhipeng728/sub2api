@@ -2483,19 +2483,21 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	// 但本次返回了新的 response_id。把它写回 (account,model) → response_id 绑定，使后续请求
 	// 能用新 id 继续续接，session 持续滚动可用。
 	if prewarmInjected && responseID != "" && s.isOpenAIPrewarmSessionEnabled() {
+		modelKey := normalizeOpenAIPrewarmModelKey(mappedModel)
 		prewarmTTL := s.openAIPrewarmSessionTTL()
 		if prewarmStore := s.getOpenAIPrewarmSessionStore(); prewarmStore != nil {
-			if err := prewarmStore.SetPrewarmSession(ctx, account.ID, normalizeOpenAIPrewarmModelKey(mappedModel), responseID, prewarmTTL); err != nil {
+			// 把滚动出的新 id 压回池，供后续请求复用（稳态自维持，避免每请求都现铸 = 把握手减半）。
+			if err := prewarmStore.PushPrewarmSessionPool(ctx, account.ID, modelKey, responseID, openAIPrewarmPoolMaxDepth(account), prewarmTTL); err != nil {
 				logOpenAIWSModeInfo(
 					"prewarm_session_roll_update_fail account_id=%d model=%s new_response_id=%s cause=%s",
-					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+					account.ID, modelKey,
 					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
 					truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
 				)
 			} else {
 				logOpenAIWSModeInfo(
 					"prewarm_session_roll_update account_id=%d model=%s old_response_id=%s new_response_id=%s",
-					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+					account.ID, modelKey,
 					truncateOpenAIWSLogValue(openAIWSPayloadString(payload, "previous_response_id"), openAIWSIDValueMaxLen),
 					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
 				)

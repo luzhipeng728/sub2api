@@ -80,3 +80,54 @@ func (c *prewarmSessionCache) DeletePrewarmSession(ctx context.Context, key stri
 	}
 	return c.rdb.Del(ctx, key).Err()
 }
+
+// PushPrewarmPool 把一个 prewarm id 追加到池(LIST)尾部，并裁剪到 maxDepth、刷新 TTL。
+// 用 pipeline 单次往返完成 RPUSH + LTRIM + EXPIRE。
+func (c *prewarmSessionCache) PushPrewarmPool(ctx context.Context, key, value string, maxDepth int, ttl time.Duration) error {
+	if key == "" || value == "" {
+		return nil
+	}
+	if maxDepth <= 0 {
+		maxDepth = 1
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	pipe := c.rdb.Pipeline()
+	pipe.RPush(ctx, key, value)
+	// 只保留最新的 maxDepth 个，避免无界增长。
+	pipe.LTrim(ctx, key, int64(-maxDepth), -1)
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// PopPrewarmPool 从池(LIST)头部原子弹出一个 prewarm id；池空返回 ("", nil)。
+func (c *prewarmSessionCache) PopPrewarmPool(ctx context.Context, key string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	value, err := c.rdb.LPop(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", err
+	}
+	return value, nil
+}
+
+// PrewarmPoolLen 返回池当前深度。
+func (c *prewarmSessionCache) PrewarmPoolLen(ctx context.Context, key string) (int, error) {
+	if key == "" {
+		return 0, nil
+	}
+	n, err := c.rdb.LLen(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return int(n), nil
+}
