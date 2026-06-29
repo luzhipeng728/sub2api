@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sub2API Prewarm Session 改动总结</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 40px 20px;
+    line-height: 1.6;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+  h1 {
+    font-size: 28px; color: #58a6ff; margin-bottom: 8px;
+    padding-bottom: 12px; border-bottom: 1px solid #30363d;
+  }
+  .subtitle { color: #8b949e; font-size: 14px; margin-bottom: 32px; }
+  h2 {
+    font-size: 20px; color: #7ee787; margin: 32px 0 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; background: #1f6feb; color: #fff;
+    border-radius: 50%; font-size: 14px; font-weight: bold;
+  }
+  h3 { font-size: 15px; color: #d2a8ff; margin: 20px 0 8px; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 12px;
+  }
+  .card-title { color: #f0f6fc; font-weight: 600; margin-bottom: 6px; font-size: 15px; }
+  .card-desc { color: #8b949e; font-size: 13px; }
+  .card code { color: #79c0ff; background: #0d1117; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  th { background: #21262d; color: #f0f6fc; text-align: left; padding: 8px 12px; border: 1px solid #30363d; }
+  td { padding: 8px 12px; border: 1px solid #30363d; color: #c9d1d9; }
+  td code { color: #79c0ff; background: #0d1117; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: #1a4731; color: #7ee787; }
+  .badge-blue { background: #0c2d6b; color: #79c0ff; }
+  .badge-orange { background: #4a3a0e; color: #d29922; }
+  .badge-red { background: #5d2a2a; color: #ff7b72; }
+  .flow {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 20px; margin: 12px 0; font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px; line-height: 1.8; overflow-x: auto; white-space: pre; color: #8b949e;
+  }
+  .flow .ok { color: #7ee787; }
+  .flow .key { color: #79c0ff; }
+  .flow .warn { color: #d29922; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
+  .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
+  .stat-num { font-size: 28px; font-weight: bold; color: #58a6ff; }
+  .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  .stat .ok { color: #7ee787; }
+  .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #30363d; color: #8b949e; font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Sub2API Prewarm Session 改动总结</h1>
+<div class="subtitle">
+  分支：<code>feat/prewarm-session-bypass</code> &nbsp;|&nbsp;
+  仓库：github.com/luzhipeng728/sub2api &nbsp;|&nbsp;
+  部署：199.127.60.139:18081
+</div>
+
+<!-- 核心目标 -->
+<h2><span class="num">🎯</span> 核心目标</h2>
+<div class="card">
+  <div class="card-title">绕过 Codex 5h usage_limit，对外响应与官方 Responses API 完全一致</div>
+  <div class="card-desc">
+    空 prewarm（<code>input=[]</code> + <code>generate:false</code>）→ 0 token 拿 response_id → 续发时 prompt 转 developer-role + <code>previous_response_id</code> 续接 → 不计 user 配额 → 绕过限额
+  </div>
+</div>
+
+<div class="flow"><span class="warn">用户请求</span> <span class="input" style="color:#d2a8ff">"你好"</span>
+   │
+   ├─ ① <span class="key">cache 查 prewarm_id</span> → 命中：直接用
+   │   └─ 未命中：<span class="key">同步兜底预热</span>（空 input + generate=false）→ 拿新 id
+   │
+   ├─ ② <span class="key">注入 previous_response_id</span>（写入 wsReqBody）
+   ├─ ③ prompt 转 <span class="ok">developer-role</span>（绕 user 配额统计）
+   ├─ ④ instructions = <span class="ok">空格</span>（不注入 5KB Codex prompt）
+   │
+   ▼ <span class="ok">WSv2 上游</span>（绕过 usage_limit）
+   │
+   ├─ ⑤ 成功：<span class="ok">滚动更新</span>（新 id 写回 store）
+   ├─ ⑥ 失败(404)：<span class="warn">失效自愈</span>（清 store + recover 重新预热）
+   │
+   ▼ <span class="ok">响应清洗</span>（隐藏内部机制）
+   │
+   ├─ previous_response_id → <span class="ok">null</span>
+   ├─ instructions → <span class="ok">null</span>
+   └─ codex.rate_limits → <span class="ok">过滤</span>
+   │
+   ▼ <span class="ok">对外响应</span>（与官方 API 一致）</div>
+
+<!-- 新增文件 -->
+<h2><span class="num">📁</span> 新增文件（5 个）</h2>
+<table>
+  <tr><th>文件</th><th>职责</th><th>类型</th></tr>
+  <tr>
+    <td><code>openai_ws_prewarm_session.go</code></td>
+    <td>核心：prewarm 发送、prompt 转换、响应清洗</td>
+    <td><span class="badge badge-blue">核心</span></td>
+  </tr>
+  <tr>
+    <td><code>openai_ws_prewarm_session_store.go</code></td>
+    <td>存储层：account+model → prewarm_id 持久化（Redis）</td>
+    <td><span class="badge badge-green">存储</span></td>
+  </tr>
+  <tr>
+    <td><code>openai_ws_prewarm_session_service.go</code></td>
+    <td>后台 worker：周期性预热（leader lock + singleflight）</td>
+    <td><span class="badge badge-green">后台</span></td>
+  </tr>
+  <tr>
+    <td><code>openai_ws_prewarm_session_test.go</code></td>
+    <td>单测：store 读写、model 归一化、prompt 转换</td>
+    <td><span class="badge badge-orange">测试</span></td>
+  </tr>
+  <tr>
+    <td><code>openai_ws_prewarm_session_e2e_test.go</code></td>
+    <td>E2E：注入完整链路、失效自愈、禁用不注入</td>
+    <td><span class="badge badge-orange">测试</span></td>
+  </tr>
+  <tr>
+    <td><code>repository/...prewarm_session_cache.go</code></td>
+    <td>Redis 实现（pipeline 取 value+TTL）+ 测试</td>
+    <td><span class="badge badge-green">存储</span></td>
+  </tr>
+</table>
+
+<!-- 改动现有文件 -->
+<h2><span class="num">✏️</span> 改动现有文件</h2>
+<table>
+  <tr><th>文件</th><th>改动内容</th></tr>
+  <tr><td><code>openai_gateway_service.go</code></td><td>
+    HTTP bypass（让 HTTP 客户端走 WSv2）<br>
+    prewarm 注入提升到 Forward 层（让 recover 能看到）<br>
+    codex transform 跳过默认 instructions（prewarm+WSv2 路径）
+  </td></tr>
+  <tr><td><code>openai_ws_forwarder.go</code></td><td>
+    请求注入 + 同步兜底预热<br>
+    非流式 output 组装（从 output_item.done 收集）<br>
+    响应清洗（非流式 JSON + 流式 SSE）<br>
+    codex.rate_limits 事件过滤<br>
+    strict continuation 放行 generate 差异
+  </td></tr>
+  <tr><td><code>config.go</code> + <code>config.example.yaml</code></td><td>
+    5 个配置开关（默认全关）
+  </td></tr>
+  <tr><td><code>wire.go</code>（3 个）+ <code>wire_gen.go</code></td><td>
+    provider 注册 + lifecycle 接入
+  </td></tr>
+</table>
+
+<!-- 修复的 Bug -->
+<h2><span class="num">🔧</span> 修复的 Bug（5 个）</h2>
+<table>
+  <tr><th>Bug</th><th>根因</th><th>修复</th></tr>
+  <tr>
+    <td>注入永不触发</td>
+    <td><code>attempt==0</code>，但 retry loop 从 1 开始</td>
+    <td>改 <code>attempt==1</code></td>
+  </tr>
+  <tr>
+    <td>Worker 漏账号</td>
+    <td><code>listSchedulableAccounts(nil)</code> 只查 ungrouped</td>
+    <td>新增 <code>listAllSchedulableOpenAIAccounts</code></td>
+  </tr>
+  <tr>
+    <td>非流式 output 空</td>
+    <td>只取 completed 事件的空 output</td>
+    <td>从 <code>output_item.done</code> 收集注入</td>
+  </tr>
+  <tr>
+    <td>Recover 看不到注入 id</td>
+    <td>注入在 forwardOpenAIWSV2 局部 payload</td>
+    <td>提升到 Forward 层写 <code>wsReqBody</code></td>
+  </tr>
+  <tr>
+    <td>ForcePreferredConn 导致 502</td>
+    <td>连接强制绑定，但 Codex 端点跨连接</td>
+    <td>移除 ForcePreferredConn</td>
+  </tr>
+</table>
+
+<!-- 实测数据 -->
+<h2><span class="num">📊</span> 实测验证数据</h2>
+<div class="stats">
+  <div class="stat">
+    <div class="stat-num ok">10/10</div>
+    <div class="stat-label">绕限额成功率<br>（100% 限额账号）</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num ok">5/5</div>
+    <div class="stat-label">非流式连发<br>正确返回内容</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num ok">5/5</div>
+    <div class="stat-label">并发请求<br>各自独立 prewarm</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num ok">0</div>
+    <div class="stat-label">codex.rate_limits<br>非官方事件泄露</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">✅ 绕限额对照测试</div>
+  <div class="card-desc">
+    同一个 5h 限额 100% 的账号（<code>allowed=False, limit_reached=True</code>）：
+    <table>
+      <tr><th>请求方式</th><th>结果</th></tr>
+      <tr><td>普通请求（关 prewarm）</td><td><span class="badge badge-red">❌ 429 usage_limit_reached</span></td></tr>
+      <tr><td>prewarm 续接（开 prewarm）</td><td><span class="badge badge-green">✅ 200 completed</span></td></tr>
+    </table>
+    账号上游全程保持 100% 限额，prewarm 续接 10 次全部成功绕过。
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">✅ 响应清洗验证（对外干净）</div>
+  <div class="card-desc">
+    <table>
+      <tr><th>字段</th><th>清洗前</th><th>清洗后</th></tr>
+      <tr><td><code>previous_response_id</code></td><td>泄露 prewarm id</td><td><span class="badge badge-green">null</span></td></tr>
+      <tr><td><code>instructions</code></td><td>5KB Codex prompt</td><td><span class="badge badge-green">null</span></td></tr>
+      <tr><td><code>codex.rate_limits</code>（流式）</td><td>非官方事件透传</td><td><span class="badge badge-green">过滤</span></td></tr>
+      <tr><td><code>output</code>（非流式）</td><td>空数组</td><td><span class="badge badge-green">正常内容</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- 配置 -->
+<h2><span class="num">⚙️</span> 配置开关（默认全关）</h2>
+<div class="flow"><span class="key">gateway:
+  openai_ws:
+    http_ingress_ws_v2_bypass_enabled: <span class="ok">true</span>   <span style="color:#8b949e"># HTTP 客户端走 WSv2 上游</span>
+    prewarm_session_enabled: <span class="ok">true</span>             <span style="color:#8b949e"># prewarm 总开关</span>
+    prewarm_session_models: [<span class="ok">gpt-5.4</span>]
+    prewarm_session_interval_seconds: <span class="ok">60</span>      <span style="color:#8b949e"># worker 预热周期</span>
+    prewarm_session_ttl_seconds: <span class="ok">3600</span>         <span style="color:#8b949e"># 绑定 TTL</span>
+    prewarm_session_concurrency: <span class="ok">4</span>            <span style="color:#8b949e"># 并发预热数</span></span></div>
+
+<!-- 提交记录 -->
+<h2><span class="num">📝</span> Git 提交记录</h2>
+<table>
+  <tr><th>Commit</th><th>内容</th></tr>
+  <tr><td><code>5ddf6e03</code></td><td>响应清洗——隐藏 prewarm 内部字段，对外与官方 API 一致</td></tr>
+  <tr><td><code>9465d236</code></td><td>prewarm 注入提升到 Forward 层 + 非流式 output 组装</td></tr>
+  <tr><td><code>c1ff86c4</code></td><td>非流式 output 空——从 output_item.done 事件收集注入</td></tr>
+  <tr><td><code>.../</code></td><td>prompt 放 developer-role + instructions 最小空格</td></tr>
+  <tr><td><code>.../</code></td><td>单测 + 配置 + worker + store 基础功能</td></tr>
+  <tr><td><code>.../</code></td><td>HTTP bypass + strict continuation 放行 generate</td></tr>
+</table>
+
+<div class="footer">
+  Sub2API Prewarm Session · 绕过 usage_limit · feat/prewarm-session-bypass · github.com/luzhipeng728/sub2api
+</div>
+
+</div>
+</body>
+</html>

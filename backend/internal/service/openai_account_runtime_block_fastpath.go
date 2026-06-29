@@ -52,7 +52,9 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		return true
 	}
 	shouldDisable := s.rateLimitService.HandleUpstreamError(stateCtx, account, statusCode, headers, responseBody)
-	if shouldDisable {
+	// prewarm session 启用时跳过 upstream disable block：限额账号的 429/disable 是预期的，
+	// prewarm 续接会绕过限额。block 会导致所有账号被内存排除 → 503。
+	if shouldDisable && !s.isOpenAIPrewarmSessionEnabled() {
 		s.BlockAccountScheduling(account, time.Time{}, "upstream_disable")
 	}
 	return shouldDisable
@@ -60,6 +62,11 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 
 func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
 	if s == nil || !isOpenAIOAuthAccount(account) {
+		return
+	}
+	// prewarm session 启用时跳过 429 runtime block：prewarm 的设计就是让限额账号（会返回 429）
+	// 也能通过续接绕过限额。如果 429 就 block 账号，会导致所有限额账号被内存排除 → no available accounts → 503。
+	if s.isOpenAIPrewarmSessionEnabled() {
 		return
 	}
 	s.recordOpenAIOAuth429()
