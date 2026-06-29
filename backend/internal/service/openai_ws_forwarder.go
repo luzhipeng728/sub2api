@@ -2099,6 +2099,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	var firstTokenMs *int
 	responseID := ""
 	var finalResponse []byte
+	// 非流式：收集 output_item.done 事件的 items，因为 response.completed 事件里的
+	// response.output 可能为空（上游把 output 内容放在单独的 output_item.done 事件里）。
+	var nonStreamOutputItems []json.RawMessage
 	wroteDownstream := false
 	needModelReplace := originalModel != mappedModel
 	var mappedModelBytes []byte
@@ -2400,6 +2403,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if responseField.Exists() && responseField.Type == gjson.JSON {
 				finalResponse = []byte(responseField.Raw)
 			}
+			// 非流式：收集 output_item.done 事件的 item（completed 事件的 output 可能为空）。
+			if eventType == "response.output_item.done" {
+				if item := gjson.GetBytes(message, "item"); item.Exists() {
+					nonStreamOutputItems = append(nonStreamOutputItems, json.RawMessage(item.Raw))
+				}
+			}
 		}
 
 		if isTerminalEvent {
@@ -2423,6 +2432,18 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				return nil, wrapOpenAIWSFallback("missing_final_response", errors.New("no terminal response payload"))
 			}
 			return nil, errors.New("ws finished without final response")
+		}
+
+		// 非流式：如果 completed 事件的 output 为空但收集到了 output_item.done items，
+		// 把它们注入 finalResponse 的 output 字段（上游可能不把 output 回填到 completed 事件）。
+		if len(nonStreamOutputItems) > 0 && len(finalResponse) > 0 {
+			existingOutput := gjson.GetBytes(finalResponse, "output")
+			if !existingOutput.Exists() || len(existingOutput.Array()) == 0 {
+				itemsJSON, _ := json.Marshal(nonStreamOutputItems)
+				if updated, err := sjson.SetRawBytes(finalResponse, "output", itemsJSON); err == nil {
+					finalResponse = updated
+				}
+			}
 		}
 
 		if needModelReplace {
