@@ -1473,6 +1473,10 @@ func normalizeOpenAIWSPayloadWithoutInputAndPreviousResponseID(payload []byte) (
 	}
 	delete(decoded, "input")
 	delete(decoded, "previous_response_id")
+	// generate 是 prewarm 轮（generate:false）的固有特征，business 续轮天然不带它，
+	// 不属于语义级字段漂移。排除后可放行官方 prewarm -> business continuation 链路（issue #1569），
+	// 真实漂移（model/instructions/tools/store 等）仍会被逐字节比较拦截。
+	delete(decoded, "generate")
 	return json.Marshal(decoded)
 }
 
@@ -1794,6 +1798,44 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
+	// prewarmInjected 标记本次请求是否注入了 prewarm response_id。注入后必须强制复用
+	// prewarm 那条 WS 连接（store=false 下 response 上下文只在连接内存活），否则会 404。
+	prewarmInjected := false
+	// 账号级 prewarm session 注入：请求本身未带 previous_response_id 且首轮尝试时，
+	// 取出 (groupID, accountID, model) 的预热 response_id 注入，让上游当作续接处理。
+	// 仅在首请求注入（wsRetryLoop 的 attempt 从 1 开始）；若上游返回 previous_response_not_found，
+	// recover 逻辑会 drop 并重试。
+	if attempt == 1 && openAIWSPayloadString(payload, "previous_response_id") == "" {
+		if s.isOpenAIPrewarmSessionEnabled() {
+			groupIDForPrewarm := getOpenAIGroupIDFromContext(c)
+			// store=false 下每个 prewarm_id 只能被成功续接一次（续接产生的新 response 不被服务端存储），
+			// 因此 cache 里的 id 可能已被消费。优先尝试 cache，未命中或不可用时同步兜底预热一个新 id。
+			prewarmID, ok := s.tryGetOpenAIPrewarmSession(ctx, groupIDForPrewarm, account, mappedModel)
+			prewarmSource := "cache"
+			if !ok {
+				// 同步兜底预热：请求路径内当场发一个空 prewarm 拿新 id。多 ~500ms 延迟，
+				// 换取每次请求都能绕过 usage_limit（绕限额是 prewarm 的核心价值）。
+				// 注意：store=false 下每个 prewarm_id 只能被成功续接一次，因此并发请求必须各自
+				// 拿独立 id（不能用 singleflight 共享，否则其余请求会因 id 被消费而 404）。
+				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, mappedModel); err == nil && newID != "" {
+					prewarmID = newID
+					ok = true
+					prewarmSource = "fallback"
+				}
+			}
+			if ok {
+				payload["previous_response_id"] = prewarmID
+				ensureOpenAIPrewarmContinuationInput(payload, mappedModel)
+				prewarmInjected = true
+				logOpenAIWSModeInfo(
+					"prewarm_session_inject account_id=%d model=%s response_id=%s source=%s",
+					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+					truncateOpenAIWSLogValue(prewarmID, openAIWSIDValueMaxLen),
+					prewarmSource,
+				)
+			}
+		}
+	}
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 	promptCacheKey := openAIWSPayloadString(payload, "prompt_cache_key")
@@ -2271,6 +2313,18 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				errMessage,
 			)
 			if fallbackReason == "previous_response_not_found" {
+				// prewarm 注入的 id 续接失败：上游已消费/清理了该 response，必须从 store 清除，
+				// 让 worker 下个周期重新预热，否则后续请求会持续命中失效 id（404 连锁）。
+				// 注意：Forward 层的 recoverPrevResponseNotFound 操作的是 wsReqBody（看不到
+				// forwardOpenAIWSV2 内部注入的 id），所以失效清理必须在这里做。
+				if prewarmInjected && s.isOpenAIPrewarmSessionEnabled() {
+					s.invalidateOpenAIPrewarmSession(ctx, account, mappedModel)
+					logOpenAIWSModeInfo(
+						"prewarm_session_invalidate account_id=%d model=%s reason=previous_response_not_found response_id=%s",
+						account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+						truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen),
+					)
+				}
 				logOpenAIWSModeInfo(
 					"previous_response_not_found_diag account_id=%d account_type=%s conn_id=%s previous_response_id=%s previous_response_id_kind=%s response_id=%s event_idx=%d req_stream=%v store_disabled=%v conn_reused=%v session_hash=%s header_session_id=%s header_conversation_id=%s session_id_source=%s conversation_id_source=%s has_turn_state=%v turn_state_len=%d has_prompt_cache_key=%v err_code=%s err_type=%s err_message=%s",
 					account.ID,
@@ -2389,6 +2443,29 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		ttl := s.openAIWSResponseStickyTTL()
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
 		stateStore.BindResponseConn(responseID, lease.ConnID(), ttl)
+	}
+	// prewarm session 滚动更新：续接成功后，OpenAI 服务端会消费旧的 prewarm_id（再次续接会 404），
+	// 但本次返回了新的 response_id。把它写回 (account,model) → response_id 绑定，使后续请求
+	// 能用新 id 继续续接，session 持续滚动可用。
+	if prewarmInjected && responseID != "" && s.isOpenAIPrewarmSessionEnabled() {
+		prewarmTTL := s.openAIPrewarmSessionTTL()
+		if prewarmStore := s.getOpenAIPrewarmSessionStore(); prewarmStore != nil {
+			if err := prewarmStore.SetPrewarmSession(ctx, account.ID, normalizeOpenAIPrewarmModelKey(mappedModel), responseID, prewarmTTL); err != nil {
+				logOpenAIWSModeInfo(
+					"prewarm_session_roll_update_fail account_id=%d model=%s new_response_id=%s cause=%s",
+					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
+					truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
+				)
+			} else {
+				logOpenAIWSModeInfo(
+					"prewarm_session_roll_update account_id=%d model=%s old_response_id=%s new_response_id=%s",
+					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
+					truncateOpenAIWSLogValue(openAIWSPayloadString(payload, "previous_response_id"), openAIWSIDValueMaxLen),
+					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
+				)
+			}
+		}
 	}
 	if stateStore != nil && storeDisabled && sessionHash != "" {
 		stateStore.BindSessionConn(groupID, sessionHash, lease.ConnID(), s.openAIWSSessionStickyTTL())

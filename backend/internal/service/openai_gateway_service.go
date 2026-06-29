@@ -367,6 +367,10 @@ type OpenAIGatewayService struct {
 	openaiWSPassthroughDialer     openAIWSClientDialer
 	openaiAccountStats            *openAIAccountRuntimeStats
 
+	openaiWSPrewarmSessionStoreOnce sync.Once
+	openaiWSPrewarmSessionStore     OpenAIWSPrewarmSessionStore
+	openaiWSPrewarmSessionSetter    OpenAIPrewarmSessionCache
+
 	openaiWSFallbackUntil               sync.Map // key: int64(accountID), value: time.Time
 	openaiAccountRuntimeBlockUntil      sync.Map // key: int64(accountID), value: time.Time
 	openaiOAuth429WindowStartUnixNano   atomic.Int64
@@ -444,6 +448,39 @@ func NewOpenAIGatewayService(
 	}
 	svc.logOpenAIWSModeBootstrap()
 	return svc
+}
+
+// SetOpenAIPrewarmSessionCache 注入 prewarm session 的 Redis 缓存实现（repository 层提供）。
+// 必须在服务启动前注入；未注入时 prewarm session 功能降级为禁用（空实现），不影响主流程。
+func (s *OpenAIGatewayService) SetOpenAIPrewarmSessionCache(cache OpenAIPrewarmSessionCache) {
+	if s == nil {
+		return
+	}
+	s.openaiWSPrewarmSessionSetter = cache
+}
+
+// getOpenAIPrewarmSessionStore 懒加载 prewarm session 存储实现。
+// 功能关闭 / 未注入缓存时返回空实现，调用方据此短路。
+func (s *OpenAIGatewayService) getOpenAIPrewarmSessionStore() OpenAIWSPrewarmSessionStore {
+	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIWS.PrewarmSessionEnabled {
+		return nil
+	}
+	s.openaiWSPrewarmSessionStoreOnce.Do(func() {
+		if s.openaiWSPrewarmSessionSetter != nil {
+			s.openaiWSPrewarmSessionStore = NewOpenAIWSPrewarmSessionStore(s.openaiWSPrewarmSessionSetter)
+		}
+	})
+	return s.openaiWSPrewarmSessionStore
+}
+
+// isOpenAIPrewarmSessionEnabled 表示账号级 prewarm session 功能是否启用。
+func (s *OpenAIGatewayService) isOpenAIPrewarmSessionEnabled() bool {
+	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.PrewarmSessionEnabled && s.getOpenAIPrewarmSessionStore() != nil
+}
+
+// isOpenAIHTTPIngressWSV2BypassEnabled 表示是否允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游。
+func (s *OpenAIGatewayService) isOpenAIHTTPIngressWSV2BypassEnabled() bool {
+	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled
 }
 
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
@@ -2168,6 +2205,16 @@ func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accoun
 	return s.concurrencyService.AcquireAccountSlot(ctx, accountID, maxConcurrency)
 }
 
+// listAllSchedulableOpenAIAccounts 列出所有可调度的 OpenAI 账号（不区分 group）。
+// prewarm session worker 用它遍历所有账号预热，而不依赖 scheduler snapshot 的 bucket（snapshot
+// 按 group 分桶，listSchedulableAccounts(nil) 只返回 ungrouped 账号，会漏掉已绑 group 的账号）。
+func (s *OpenAIGatewayService) listAllSchedulableOpenAIAccounts(ctx context.Context) ([]Account, error) {
+	if s.accountRepo == nil {
+		return nil, errors.New("accountRepo is nil")
+	}
+	return s.accountRepo.ListSchedulableByPlatform(ctx, PlatformOpenAI)
+}
+
 func (s *OpenAIGatewayService) resolveFreshSchedulableOpenAIAccount(ctx context.Context, account *Account, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
 	if account == nil {
 		return nil
@@ -2402,6 +2449,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	clientTransport := GetOpenAIClientTransport(c)
 	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, clientTransport)
+	// HTTP 入站 WSv2 旁路：当显式开启开关且账号解析为 WSv2 时，撤销上面的 HTTP 降级，
+	// 让 HTTP 客户端（Codex CLI / opencode / curl）也能走 WSv2 上游（连接池 + prewarm session 续接）。
+	// 三重保险：flag 开 + clientTransport==HTTP + 账号 Resolve 为 WSv2，绝不误放。
+	if clientTransport == OpenAIClientTransportHTTP &&
+		wsDecision.Transport == OpenAIUpstreamTransportHTTPSSE &&
+		s.isOpenAIHTTPIngressWSV2BypassEnabled() &&
+		s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		wsDecision = OpenAIWSProtocolDecision{
+			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
+			Reason:    "http_ingress_ws_v2_bypass",
+		}
+	}
 	if c != nil {
 		c.Set("openai_ws_transport_decision", string(wsDecision.Transport))
 		c.Set("openai_ws_transport_reason", wsDecision.Reason)
@@ -2797,6 +2856,23 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			delete(wsReqBody, "previous_response_id")
 			wsPrevResponseRecoveryTried = true
+			// 若被 drop 的 previous_response_id 来自 prewarm session，清理失效绑定，
+			// 然后立即同步兜底预热一个新 id 写回 wsReqBody，让重试继续走续接绕限额，
+			// 而不是降级为普通请求（对限额账号会直接 429）。
+			if s.isOpenAIPrewarmSessionEnabled() {
+				s.invalidateOpenAIPrewarmSession(ctx, account, upstreamModel)
+				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, upstreamModel); err == nil && newID != "" {
+					wsReqBody["previous_response_id"] = newID
+					ensureOpenAIPrewarmContinuationInput(wsReqBody, upstreamModel)
+					logOpenAIWSModeInfo(
+						"reconnect_prev_response_recovery account_id=%d attempt=%d action=replace_with_fresh_prewarm old_previous_response_id=%s new_previous_response_id=%s",
+						account.ID, attempt,
+						truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen),
+						truncateOpenAIWSLogValue(newID, openAIWSIDValueMaxLen),
+					)
+					return true
+				}
+			}
 			logOpenAIWSModeInfo(
 				"reconnect_prev_response_recovery account_id=%d attempt=%d action=drop_previous_response_id retry=1 previous_response_id=%s previous_response_id_kind=%s",
 				account.ID,

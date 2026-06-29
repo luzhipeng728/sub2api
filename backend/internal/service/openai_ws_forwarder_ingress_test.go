@@ -603,6 +603,55 @@ func TestShouldKeepIngressPreviousResponseID(t *testing.T) {
 		require.Equal(t, "non_input_changed", reason)
 	})
 
+	// prewarm 轮带 generate:false，business 续轮不带 generate —— 这是官方 prewarm→business
+	// continuation 链路（issue #1569），generate 差异应放行，其他字段一致即判 strict_incremental_ok。
+	t.Run("prewarm_generate_diff_allowed", func(t *testing.T) {
+		previousPrewarm := []byte(`{
+			"type":"response.create",
+			"model":"gpt-5.1",
+			"store":false,
+			"tools":[{"type":"function","name":"tool_a"}],
+			"generate":false,
+			"input":[{"type":"input_text","text":"hello"}]
+		}`)
+		business := []byte(`{
+			"type":"response.create",
+			"model":"gpt-5.1",
+			"store":false,
+			"tools":[{"type":"function","name":"tool_a"}],
+			"previous_response_id":"resp_turn_1",
+			"input":[{"type":"input_text","text":"hello"},{"type":"input_text","text":"world"}]
+		}`)
+		keep, reason, err := shouldKeepIngressPreviousResponseID(previousPrewarm, business, "resp_turn_1", false)
+		require.NoError(t, err)
+		require.True(t, keep, "prewarm→business 的 generate 差异应放行")
+		require.Equal(t, "strict_incremental_ok", reason)
+	})
+
+	// 反例：prewarm 轮与 business 轮 model 不同 —— 即使 generate 也不同，model 真漂移仍应拦截。
+	t.Run("prewarm_generate_diff_with_model_drift_still_rejected", func(t *testing.T) {
+		previousPrewarm := []byte(`{
+			"type":"response.create",
+			"model":"gpt-5.1",
+			"store":false,
+			"tools":[{"type":"function","name":"tool_a"}],
+			"generate":false,
+			"input":[{"type":"input_text","text":"hello"}]
+		}`)
+		businessDrifted := []byte(`{
+			"type":"response.create",
+			"model":"gpt-5.1-mini",
+			"store":false,
+			"tools":[{"type":"function","name":"tool_a"}],
+			"previous_response_id":"resp_turn_1",
+			"input":[{"type":"input_text","text":"hello"},{"type":"input_text","text":"world"}]
+		}`)
+		keep, reason, err := shouldKeepIngressPreviousResponseID(previousPrewarm, businessDrifted, "resp_turn_1", false)
+		require.NoError(t, err)
+		require.False(t, keep, "model 真漂移即使 generate 也不同，仍应拦截")
+		require.Equal(t, "non_input_changed", reason)
+	})
+
 	t.Run("delta_input_keeps_previous_response_id", func(t *testing.T) {
 		payload := []byte(`{
 			"type":"response.create",

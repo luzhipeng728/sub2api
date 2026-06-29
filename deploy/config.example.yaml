@@ -268,6 +268,21 @@ gateway:
     store_disabled_force_new_conn: true
     # 是否启用 WSv2 generate=false 预热（默认 false）
     prewarm_generate_enabled: false
+    # 允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游（默认 false）
+    # 开启后 ctx_pool 模式的 HTTP 客户端（Codex CLI / opencode / curl）也能用 WS 连接池 + prewarm session 续接
+    http_ingress_ws_v2_bypass_enabled: false
+    # 账号级 prewarm session（默认 false）：为每个 (account, model) 维护一个持久 prewarm response_id，
+    # 请求未带 previous_response_id 时自动注入续接，降低首字节延迟
+    prewarm_session_enabled: false
+    # 待预热的模型列表（已归一化，默认 ["gpt-5.4"]）
+    prewarm_session_models:
+      - gpt-5.4
+    # 后台预热 worker 周期（秒，默认 300）
+    prewarm_session_interval_seconds: 300
+    # prewarm session 绑定 TTL（秒，默认 3600）
+    prewarm_session_ttl_seconds: 3600
+    # 后台预热并发数（默认 4）
+    prewarm_session_concurrency: 4
     # 协议 feature 开关，v2 优先于 v1
     responses_websockets: false
     responses_websockets_v2: true

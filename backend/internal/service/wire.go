@@ -193,6 +193,22 @@ func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, se
 	return svc
 }
 
+// ProvideOpenAIPrewarmSessionService 创建并启动 OpenAI prewarm session 后台 worker。
+// 将 Redis 缓存实现注入到 OpenAIGatewayService（供请求路径读写绑定），
+// 再构造 worker 并选主启动。功能关闭时 worker 不启动（Start 内部短路）。
+func ProvideOpenAIPrewarmSessionService(gw *OpenAIGatewayService, cache OpenAIPrewarmSessionCache, lockCache LeaderLockCache, db *sql.DB) *OpenAIWSPrewarmSessionService {
+	if gw != nil && cache != nil {
+		gw.SetOpenAIPrewarmSessionCache(cache)
+	}
+	svc := NewOpenAIWSPrewarmSessionService(gw)
+	if svc == nil {
+		return nil
+	}
+	svc.SetLeaderLock(lockCache, db)
+	svc.Start()
+	return svc
+}
+
 // ProvideTimingWheelService creates and starts TimingWheelService
 func ProvideTimingWheelService() (*TimingWheelService, error) {
 	svc, err := NewTimingWheelService()
@@ -578,6 +594,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAccountExpiryService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
+	ProvideOpenAIPrewarmSessionService,
 	ProvideTimingWheelService,
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,

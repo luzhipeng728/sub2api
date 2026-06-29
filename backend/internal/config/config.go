@@ -873,6 +873,9 @@ type GatewayOpenAIWSConfig struct {
 	APIKeyEnabled bool `mapstructure:"apikey_enabled"`
 	// ForceHTTP: 全局强制 HTTP（用于紧急回滚）
 	ForceHTTP bool `mapstructure:"force_http"`
+	// HTTPIngressWSV2BypassEnabled: 允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游（默认 false）。
+	// 开启后 ctx_pool 模式的 HTTP 客户端（Codex CLI / opencode / curl）也能用 WS 连接池 + prewarm session 续接。
+	HTTPIngressWSV2BypassEnabled bool `mapstructure:"http_ingress_ws_v2_bypass_enabled"`
 	// AllowStoreRecovery: 允许在 WSv2 下按策略恢复 store=true（默认 false）
 	AllowStoreRecovery bool `mapstructure:"allow_store_recovery"`
 	// IngressPreviousResponseRecoveryEnabled: ingress 模式收到 previous_response_not_found 时，是否允许自动去掉 previous_response_id 重试一次（默认 true）
@@ -887,6 +890,18 @@ type GatewayOpenAIWSConfig struct {
 	StoreDisabledForceNewConn bool `mapstructure:"store_disabled_force_new_conn"`
 	// PrewarmGenerateEnabled: 是否启用 WSv2 generate=false 预热（默认 false）
 	PrewarmGenerateEnabled bool `mapstructure:"prewarm_generate_enabled"`
+	// PrewarmSessionEnabled: 是否启用账号级 prewarm session（默认 false）。
+	// 启用后后台 worker 会为每个 (account, model) 维护一个持久的 prewarm response_id，
+	// 请求未带 previous_response_id 时自动注入，让上游当作续接处理，降低首字节延迟。
+	PrewarmSessionEnabled bool `mapstructure:"prewarm_session_enabled"`
+	// PrewarmSessionModels: 待预热的模型列表（已归一化，默认 ["gpt-5.4"]）。
+	PrewarmSessionModels []string `mapstructure:"prewarm_session_models"`
+	// PrewarmSessionIntervalSeconds: 后台 worker 预热周期（秒，默认 300）。
+	PrewarmSessionIntervalSeconds int `mapstructure:"prewarm_session_interval_seconds"`
+	// PrewarmSessionTTLSeconds: prewarm session 绑定 TTL（秒，默认 3600）。
+	PrewarmSessionTTLSeconds int `mapstructure:"prewarm_session_ttl_seconds"`
+	// PrewarmSessionConcurrency: 后台 worker 并发预热数（默认 4）。
+	PrewarmSessionConcurrency int `mapstructure:"prewarm_session_concurrency"`
 	// ClientReadLimitBytes: 入站客户端 WS 单帧读取上限。
 	ClientReadLimitBytes int64 `mapstructure:"client_read_limit_bytes"`
 	// HTTPBridgeEnabled: 首包过大时，保持客户端 WS，改用 HTTP Responses 上游。
@@ -1836,11 +1851,17 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.oauth_enabled", true)
 	viper.SetDefault("gateway.openai_ws.apikey_enabled", true)
 	viper.SetDefault("gateway.openai_ws.force_http", false)
+	viper.SetDefault("gateway.openai_ws.http_ingress_ws_v2_bypass_enabled", false)
 	viper.SetDefault("gateway.openai_ws.allow_store_recovery", false)
 	viper.SetDefault("gateway.openai_ws.ingress_previous_response_recovery_enabled", true)
 	viper.SetDefault("gateway.openai_ws.store_disabled_conn_mode", "strict")
 	viper.SetDefault("gateway.openai_ws.store_disabled_force_new_conn", true)
 	viper.SetDefault("gateway.openai_ws.prewarm_generate_enabled", false)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_enabled", false)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_models", []string{"gpt-5.4"})
+	viper.SetDefault("gateway.openai_ws.prewarm_session_interval_seconds", 300)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_ttl_seconds", 3600)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_concurrency", 4)
 	viper.SetDefault("gateway.openai_ws.client_read_limit_bytes", 64*1024*1024)
 	viper.SetDefault("gateway.openai_ws.http_bridge_enabled", true)
 	viper.SetDefault("gateway.openai_ws.http_bridge_threshold_bytes", 15*1024*1024)
@@ -2582,6 +2603,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIWS.PrewarmCooldownMS < 0 {
 		return fmt.Errorf("gateway.openai_ws.prewarm_cooldown_ms must be non-negative")
+	}
+	if c.Gateway.OpenAIWS.PrewarmSessionEnabled {
+		if c.Gateway.OpenAIWS.PrewarmSessionIntervalSeconds <= 0 {
+			return fmt.Errorf("gateway.openai_ws.prewarm_session_interval_seconds must be positive when prewarm_session_enabled")
+		}
+		if c.Gateway.OpenAIWS.PrewarmSessionTTLSeconds <= 0 {
+			return fmt.Errorf("gateway.openai_ws.prewarm_session_ttl_seconds must be positive when prewarm_session_enabled")
+		}
+		if len(c.Gateway.OpenAIWS.PrewarmSessionModels) == 0 {
+			return fmt.Errorf("gateway.openai_ws.prewarm_session_models must not be empty when prewarm_session_enabled")
+		}
 	}
 	if c.Gateway.OpenAIWS.ClientReadLimitBytes <= 0 {
 		return fmt.Errorf("gateway.openai_ws.client_read_limit_bytes must be positive")

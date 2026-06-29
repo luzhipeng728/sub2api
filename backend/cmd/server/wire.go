@@ -95,6 +95,7 @@ func provideCleanup(
 	geminiOAuth *service.GeminiOAuthService,
 	antigravityOAuth *service.AntigravityOAuthService,
 	openAIGateway *service.OpenAIGatewayService,
+	openAIPrewarmSession *service.OpenAIWSPrewarmSessionService,
 	scheduledTestRunner *service.ScheduledTestRunnerService,
 	backupSvc *service.BackupService,
 	paymentOrderExpiry *service.PaymentOrderExpiryService,
@@ -172,6 +173,12 @@ func provideCleanup(
 			}},
 			{"AccountExpiryService", func() error {
 				accountExpiry.Stop()
+				return nil
+			}},
+			{"OpenAIPrewarmSessionService", func() error {
+				if openAIPrewarmSession != nil {
+					openAIPrewarmSession.Stop()
+				}
 				return nil
 			}},
 			{"ProxyExpiryService", func() error {

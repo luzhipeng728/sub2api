@@ -1,0 +1,232 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// fakePrewarmSessionCache 是 OpenAIPrewarmSessionCache 的内存实现，用于单测。
+type fakePrewarmSessionCache struct {
+	data map[string]fakePrewarmEntry
+	err  error
+}
+type fakePrewarmEntry struct {
+	value     string
+	ttl       time.Duration
+	createdAt time.Time
+}
+
+func newFakePrewarmSessionCache() *fakePrewarmSessionCache {
+	return &fakePrewarmSessionCache{data: make(map[string]fakePrewarmEntry)}
+}
+
+func (c *fakePrewarmSessionCache) SetPrewarmSession(_ context.Context, key, value string, ttl time.Duration) error {
+	if c.err != nil {
+		return c.err
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	c.data[key] = fakePrewarmEntry{value: value, ttl: ttl, createdAt: time.Now()}
+	return nil
+}
+
+func (c *fakePrewarmSessionCache) GetPrewarmSession(ctx context.Context, key string) (string, time.Duration, error) {
+	if c.err != nil {
+		return "", 0, c.err
+	}
+	entry, ok := c.data[key]
+	if !ok {
+		return "", 0, nil
+	}
+	// 模拟 TTL 衰减：已过期则视为不存在。
+	elapsed := time.Since(entry.createdAt)
+	remaining := entry.ttl - elapsed
+	if remaining <= 0 {
+		return "", 0, nil
+	}
+	return entry.value, remaining, nil
+}
+
+func (c *fakePrewarmSessionCache) DeletePrewarmSession(_ context.Context, key string) error {
+	delete(c.data, key)
+	return nil
+}
+
+func TestPrewarmSessionStore_SetGetDelete(t *testing.T) {
+	cache := newFakePrewarmSessionCache()
+	store := NewOpenAIWSPrewarmSessionStore(cache)
+	ctx := context.Background()
+
+	// 未命中
+	id, ok, err := store.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, "", id)
+
+	// 写入
+	require.NoError(t, store.SetPrewarmSession(ctx, 1, "gpt-5.4", "resp_AAA", time.Minute))
+	id, ok, err = store.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "resp_AAA", id)
+
+	// 删除
+	require.NoError(t, store.DeletePrewarmSession(ctx, 1, "gpt-5.4"))
+	id, ok, err = store.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestPrewarmSessionStore_ModelNormalizationKey(t *testing.T) {
+	cache := newFakePrewarmSessionCache()
+	store := NewOpenAIWSPrewarmSessionStore(cache)
+	ctx := context.Background()
+
+	// 不同 effort 后缀应归一到同一 key（命中同一预热）。
+	require.NoError(t, store.SetPrewarmSession(ctx, 1, "gpt-5.4-high", "resp_NORM", time.Minute))
+	id, ok, err := store.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "resp_NORM", id)
+}
+
+func TestPrewarmSessionStore_GetPrewarmSessionWithFreshness(t *testing.T) {
+	cache := newFakePrewarmSessionCache()
+	store := NewOpenAIWSPrewarmSessionStore(cache)
+	ctx := context.Background()
+
+	require.NoError(t, store.SetPrewarmSession(ctx, 2, "gpt-5.3-codex", "resp_FRESH", time.Hour))
+	id, freshness, ok, err := store.GetPrewarmSessionWithFreshness(ctx, 2, "gpt-5.3-codex")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "resp_FRESH", id)
+	// 刚写入，freshness 应接近 1。
+	require.Greater(t, freshness, 0.9)
+}
+
+func TestPrewarmSessionStore_EmptyInputsNoOp(t *testing.T) {
+	cache := newFakePrewarmSessionCache()
+	store := NewOpenAIWSPrewarmSessionStore(cache)
+	ctx := context.Background()
+
+	// accountID<=0 / 空 model / 空 responseID 都应忽略。
+	require.NoError(t, store.SetPrewarmSession(ctx, 0, "gpt-5.4", "resp", time.Minute))
+	require.NoError(t, store.SetPrewarmSession(ctx, 1, "", "resp", time.Minute))
+	require.NoError(t, store.SetPrewarmSession(ctx, 1, "gpt-5.4", "  ", time.Minute))
+	id, ok, err := store.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, "", id)
+}
+
+func TestPrewarmSessionStore_NilCacheReturnsNil(t *testing.T) {
+	// NewOpenAIWSPrewarmSessionCache 传 nil 应返回 nil store。
+	require.Nil(t, NewOpenAIWSPrewarmSessionStore(nil))
+}
+
+func TestNormalizeOpenAIPrewarmModelKey(t *testing.T) {
+	// effort 后缀剥离
+	require.Equal(t, "gpt-5.4", normalizeOpenAIPrewarmModelKey("gpt-5.4-high"))
+	require.Equal(t, "gpt-5.4", normalizeOpenAIPrewarmModelKey("gpt-5.4-none"))
+	// 旧版本升级
+	require.Equal(t, "gpt-5.3-codex", normalizeOpenAIPrewarmModelKey("gpt-5.1-codex"))
+	// 空值
+	require.Equal(t, "", normalizeOpenAIPrewarmModelKey(""))
+	require.Equal(t, "", normalizeOpenAIPrewarmModelKey("   "))
+}
+
+func TestEffectiveOpenAIPrewarmGroupIDs(t *testing.T) {
+	require.Equal(t, []int64{0}, effectiveOpenAIPrewarmGroupIDs(nil))
+	require.Equal(t, []int64{0}, effectiveOpenAIPrewarmGroupIDs([]int64{}))
+	require.Equal(t, []int64{1, 2}, effectiveOpenAIPrewarmGroupIDs([]int64{1, 2}))
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_RemovesSystemMessages(t *testing.T) {
+	// system/developer 项被移除，首个 user 内容转成 developer-role。
+	payload := map[string]any{
+		"input": []any{
+			map[string]any{"role": "system", "content": "sys"},
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "sys2"},
+		},
+	}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "developer", item["role"], "首个 user prompt 应转成 developer-role")
+	require.Equal(t, "hi", item["content"])
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_NoSystemNoChange(t *testing.T) {
+	// 只有 user 时，user 内容转成 developer-role。
+	payload := map[string]any{
+		"input": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	item, _ := input[0].(map[string]any)
+	require.Equal(t, "developer", item["role"])
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_PreservesAssistantItems(t *testing.T) {
+	// user 转 developer，assistant 保留（多轮结构化内容）。
+	payload := map[string]any{
+		"input": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{"role": "assistant", "content": "prev answer"},
+			map[string]any{"role": "user", "content": "second question"},
+		},
+	}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 3, "首个 user 转 developer，其余 user/assistant 保留")
+	first, _ := input[0].(map[string]any)
+	require.Equal(t, "developer", first["role"])
+	require.Equal(t, "question", first["content"])
+	second, _ := input[1].(map[string]any)
+	require.Equal(t, "assistant", second["role"])
+	third, _ := input[2].(map[string]any)
+	require.Equal(t, "user", third["role"], "非首个 user 保留原样")
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_StringInput(t *testing.T) {
+	// input 是字符串（等价 user-role）时转成 developer-role message。
+	payload := map[string]any{"input": "hello world"}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	item, _ := input[0].(map[string]any)
+	require.Equal(t, "developer", item["role"])
+	require.Equal(t, "hello world", item["content"])
+}
+
+func TestNoOpPrewarmSessionStore(t *testing.T) {
+	var noop noOpOpenAIWSPrewarmSessionStore
+	ctx := context.Background()
+	err := noop.SetPrewarmSession(ctx, 1, "gpt-5.4", "resp", time.Minute)
+	require.NoError(t, err)
+	id, ok, err := noop.GetPrewarmSession(ctx, 1, "gpt-5.4")
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, "", id)
+	require.NoError(t, noop.DeletePrewarmSession(ctx, 1, "gpt-5.4"))
+}
+
+func TestErrOpenAIPrewarmSessionDisabled(t *testing.T) {
+	require.Error(t, errOpenAIPrewarmSessionDisabled)
+	require.True(t, errors.Is(errOpenAIPrewarmSessionDisabled, errOpenAIPrewarmSessionDisabled))
+}
