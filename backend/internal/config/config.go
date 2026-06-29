@@ -1944,10 +1944,12 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.max_line_size", 500*1024*1024)
-	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 3)
+	// 账号并发满即立即 429、不排队：max_waiting 默认 0（快速失败，不占用上游/代理资源）。
+	// 如需恢复排队，把对应 max_waiting 设为 >0 即可。
+	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 0)
 	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 120*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
-	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)
+	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 0)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
@@ -2793,8 +2795,9 @@ func (c *Config) Validate() error {
 	if c.Gateway.ModelsListCacheTTLSeconds < 10 || c.Gateway.ModelsListCacheTTLSeconds > 30 {
 		return fmt.Errorf("gateway.models_list_cache_ttl_seconds must be between 10-30")
 	}
-	if c.Gateway.Scheduling.StickySessionMaxWaiting <= 0 {
-		return fmt.Errorf("gateway.scheduling.sticky_session_max_waiting must be positive")
+	// max_waiting 允许为 0：表示"账号并发满即立即 429、不排队等待"（省上游/代理资源、快速失败）。
+	if c.Gateway.Scheduling.StickySessionMaxWaiting < 0 {
+		return fmt.Errorf("gateway.scheduling.sticky_session_max_waiting must be non-negative")
 	}
 	if c.Gateway.Scheduling.StickySessionWaitTimeout <= 0 {
 		return fmt.Errorf("gateway.scheduling.sticky_session_wait_timeout must be positive")
@@ -2802,8 +2805,8 @@ func (c *Config) Validate() error {
 	if c.Gateway.Scheduling.FallbackWaitTimeout <= 0 {
 		return fmt.Errorf("gateway.scheduling.fallback_wait_timeout must be positive")
 	}
-	if c.Gateway.Scheduling.FallbackMaxWaiting <= 0 {
-		return fmt.Errorf("gateway.scheduling.fallback_max_waiting must be positive")
+	if c.Gateway.Scheduling.FallbackMaxWaiting < 0 {
+		return fmt.Errorf("gateway.scheduling.fallback_max_waiting must be non-negative")
 	}
 	if c.Gateway.Scheduling.LoadBatchCacheTTLMS < 0 {
 		return fmt.Errorf("gateway.scheduling.load_batch_cache_ttl_ms must be non-negative")

@@ -58,8 +58,8 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 3 {
-		t.Fatalf("StickySessionMaxWaiting = %d, want 3", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
+	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 0 {
+		t.Fatalf("StickySessionMaxWaiting = %d, want 0", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
 	}
 	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 120*time.Second {
 		t.Fatalf("StickySessionWaitTimeout = %v, want 120s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
@@ -67,8 +67,8 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	if cfg.Gateway.Scheduling.FallbackWaitTimeout != 30*time.Second {
 		t.Fatalf("FallbackWaitTimeout = %v, want 30s", cfg.Gateway.Scheduling.FallbackWaitTimeout)
 	}
-	if cfg.Gateway.Scheduling.FallbackMaxWaiting != 100 {
-		t.Fatalf("FallbackMaxWaiting = %d, want 100", cfg.Gateway.Scheduling.FallbackMaxWaiting)
+	if cfg.Gateway.Scheduling.FallbackMaxWaiting != 0 {
+		t.Fatalf("FallbackMaxWaiting = %d, want 0", cfg.Gateway.Scheduling.FallbackMaxWaiting)
 	}
 	if !cfg.Gateway.Scheduling.LoadBatchEnabled {
 		t.Fatalf("LoadBatchEnabled = false, want true")
@@ -1493,7 +1493,7 @@ func TestValidateConfigErrors(t *testing.T) {
 		},
 		{
 			name:    "gateway scheduling sticky waiting",
-			mutate:  func(c *Config) { c.Gateway.Scheduling.StickySessionMaxWaiting = 0 },
+			mutate:  func(c *Config) { c.Gateway.Scheduling.StickySessionMaxWaiting = -1 },
 			wantErr: "gateway.scheduling.sticky_session_max_waiting",
 		},
 		{
