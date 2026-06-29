@@ -897,11 +897,8 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrder(
 	compactBlocked := false
 	for i := 0; i < len(selectionOrder); i++ {
 		candidate := selectionOrder[i]
+		// 候选预筛仅用 snapshot(Redis)，不打 DB。
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.RequestedModel, false, req.RequiredCapability)
-		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
-			continue
-		}
-		fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.RequestedModel, false, req.RequiredCapability)
 		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 			continue
 		}
@@ -913,16 +910,33 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrder(
 		if acquireErr != nil {
 			return nil, compactBlocked, acquireErr
 		}
-		if result != nil && result.Acquired {
-			if req.SessionHash != "" && !req.PreserveStickyBinding {
-				_ = s.service.BindStickySession(ctx, req.GroupID, req.SessionHash, fresh.ID)
-			}
-			return &AccountSelectionResult{
-				Account:     fresh,
-				Acquired:    true,
-				ReleaseFunc: result.ReleaseFunc,
-			}, compactBlocked, nil
+		if result == nil || !result.Acquired {
+			continue
 		}
+		// 槽位获取成功后，仅对"即将使用的这一个账号"做一次 DB 最终校验（防 snapshot 陈旧）。
+		// 之前是对每个候选都串行打一次 DB GetByID（首字节前的隐性累加延迟），现收敛为中选账号一次。
+		rechecked := s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.RequestedModel, false, req.RequiredCapability)
+		if rechecked == nil ||
+			!s.isAccountTransportCompatible(rechecked, req.RequiredTransport) ||
+			!s.isAccountRequestCompatible(ctx, rechecked, req) ||
+			(req.RequireCompact && openAICompactSupportTier(rechecked) == 0) {
+			// 最终校验未通过：释放刚获取的槽位，换下一个候选。
+			if req.RequireCompact && rechecked != nil && openAICompactSupportTier(rechecked) == 0 {
+				compactBlocked = true
+			}
+			if result.ReleaseFunc != nil {
+				result.ReleaseFunc()
+			}
+			continue
+		}
+		if req.SessionHash != "" && !req.PreserveStickyBinding {
+			_ = s.service.BindStickySession(ctx, req.GroupID, req.SessionHash, rechecked.ID)
+		}
+		return &AccountSelectionResult{
+			Account:     rechecked,
+			Acquired:    true,
+			ReleaseFunc: result.ReleaseFunc,
+		}, compactBlocked, nil
 	}
 	return nil, compactBlocked, nil
 }
@@ -945,8 +959,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		schedGroup, _ = s.service.schedulerSnapshot.GetGroupByID(ctx, *req.GroupID)
 	}
 
+	// 主动熔断阈值（复用 sticky escape 的 EWMA 阈值：默认 TTFT>15s 或 错误率>0.5 视为"已劣化"）。
+	escapeCfg := s.service.openAIStickyEscapeConfig()
 	filtered := make([]*Account, 0, len(accounts))
-	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	healthy := make([]*Account, 0, len(accounts))
 	for i := range accounts {
 		account := &accounts[i]
 		if req.ExcludedIDs != nil {
@@ -974,13 +990,33 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			continue
 		}
 		filtered = append(filtered, account)
+		// 主动熔断预筛：EWMA 未劣化的账号进入 healthy 子集（被动 block 只在真实失败后才生效，
+		// 这里在"撞墙之前"就把高错误率/高首字节的账号预剔除，避免请求被劣化账号拖慢）。
+		if _, _, _, escape := s.shouldEscapeStickyAccount(account.ID, escapeCfg); !escape {
+			healthy = append(healthy, account)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false)
+	}
+
+	// 优先只用健康账号；当且仅当存在被预剔除的劣化账号且仍有健康账号可用时启用。
+	// 全部账号都劣化时回退到全集，保证服务可用（不会因熔断把所有账号清空）。
+	effective := filtered
+	if len(healthy) > 0 && len(healthy) < len(filtered) {
+		effective = healthy
+		logOpenAIWSModeDebug(
+			"load_balance_circuit_break filtered=%d healthy=%d skipped_degraded=%d",
+			len(filtered), len(healthy), len(filtered)-len(healthy),
+		)
+	}
+
+	loadReq := make([]AccountWithConcurrency, 0, len(effective))
+	for _, account := range effective {
 		loadReq = append(loadReq, AccountWithConcurrency{
 			ID:             account.ID,
 			MaxConcurrency: account.EffectiveLoadFactor(),
 		})
-	}
-	if len(filtered) == 0 {
-		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false)
 	}
 
 	loadMap := map[int64]*AccountLoadInfo{}
@@ -990,7 +1026,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 	}
 
-	plan := s.buildOpenAIAccountLoadPlan(req, filtered, loadMap)
+	plan := s.buildOpenAIAccountLoadPlan(req, effective, loadMap)
 	candidateCount := plan.candidateCount
 	topK := plan.topK
 	loadSkew := plan.loadSkew
@@ -1015,7 +1051,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 
 	if s.service.concurrencyService != nil {
 		if freshLoadMap, loadErr := s.service.concurrencyService.GetAccountsLoadBatchFresh(ctx, loadReq); loadErr == nil {
-			freshPlan := s.buildOpenAIAccountLoadPlan(req, filtered, freshLoadMap)
+			freshPlan := s.buildOpenAIAccountLoadPlan(req, effective, freshLoadMap)
 			if len(freshPlan.selectionOrder) > 0 {
 				freshResult, freshCompactBlocked, freshAcquireErr := s.tryAcquireOpenAISelectionOrder(ctx, req, freshPlan.selectionOrder)
 				if freshAcquireErr != nil {

@@ -1368,10 +1368,23 @@ func (p *openAIWSConnPool) targetConnCountLocked(ap *openAIWSAccountPool, maxCon
 }
 
 func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequest, total int) {
+	// remaining 记录本 goroutine 已加到 ap.creating 但尚未回退的额度。
+	// 正常路径每次 dial 后 remaining-- 并同步 ap.creating--；
+	// 若 dialConn panic 或中途 return，defer 用 remaining 把残留的 creating 额度补回，
+	// 防止 creating 计数泄漏导致 len(conns)+creating 永久虚高、再也不新建/预热。
+	remaining := total
 	defer func() {
+		_ = recover()
 		if ap, ok := p.getAccountPool(accountID); ok && ap != nil {
 			ap.mu.Lock()
 			ap.prewarmActive = false
+			if remaining > 0 {
+				if ap.creating >= remaining {
+					ap.creating -= remaining
+				} else {
+					ap.creating = 0
+				}
+			}
 			ap.mu.Unlock()
 		}
 	}()
@@ -1392,6 +1405,7 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		if ap.creating > 0 {
 			ap.creating--
 		}
+		remaining--
 		if err != nil {
 			ap.prewarmFails++
 			ap.prewarmFailAt = time.Now()

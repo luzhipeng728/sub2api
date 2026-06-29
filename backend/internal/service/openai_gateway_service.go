@@ -2834,8 +2834,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			groupIDForPrewarm := getOpenAIGroupIDFromContext(c)
 			prewarmID, prewarmOK := s.tryGetOpenAIPrewarmSession(ctx, groupIDForPrewarm, account, upstreamModel)
 			if !prewarmOK {
-				// 同步兜底预热（store=false 下每个 id 只能用一次，cache 可能已失效）。
-				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, upstreamModel); err == nil && newID != "" {
+				// 有界兜底预热：最多等 sync budget（默认 25s），超时即降级（不带 previous_response_id），
+				// 后台预热继续完成写 cache 供后续请求复用，避免被 15min read 超时拖死首字节。
+				if newID, ok := s.ensureOpenAIPrewarmSessionForRequest(ctx, nil, account, upstreamModel); ok {
 					prewarmID = newID
 					prewarmOK = true
 				}
@@ -2893,7 +2894,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			// 而不是降级为普通请求（对限额账号会直接 429）。
 			if s.isOpenAIPrewarmSessionEnabled() {
 				s.invalidateOpenAIPrewarmSession(ctx, account, upstreamModel)
-				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, upstreamModel); err == nil && newID != "" {
+				if newID, ok := s.ensureOpenAIPrewarmSessionForRequest(ctx, nil, account, upstreamModel); ok {
 					wsReqBody["previous_response_id"] = newID
 					ensureOpenAIPrewarmContinuationInput(wsReqBody, upstreamModel)
 					logOpenAIWSModeInfo(

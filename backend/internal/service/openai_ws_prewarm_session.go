@@ -241,6 +241,79 @@ func (s *OpenAIGatewayService) performOpenAIWSPrewarmSessionDedup(
 	return id, nil
 }
 
+// openAIPrewarmSessionSyncBudget 返回请求路径同步兜底预热的等待预算（默认 25s）。
+func (s *OpenAIGatewayService) openAIPrewarmSessionSyncBudget() time.Duration {
+	if s != nil && s.cfg != nil {
+		if seconds := s.cfg.Gateway.OpenAIWS.PrewarmSessionSyncBudgetSeconds; seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 25 * time.Second
+}
+
+// openAIPrewarmSessionBackgroundBudget 返回后台（脱离请求生命周期）预热的最大执行时长（默认 60s）。
+func (s *OpenAIGatewayService) openAIPrewarmSessionBackgroundBudget() time.Duration {
+	if s != nil && s.cfg != nil {
+		if seconds := s.cfg.Gateway.OpenAIWS.PrewarmSessionBackgroundBudgetSeconds; seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 60 * time.Second
+}
+
+// ensureOpenAIPrewarmSessionForRequest 是请求路径上的"有界 + 去重 + 异步补热"预热入口。
+//
+// 与直接调用 performOpenAIWSPrewarmSession 相比：
+//   - singleflight(DoChan) 去重：同 (account, model) 的并发 cache miss 只跑一次真实预热；
+//   - 真实预热在脱离请求 ctx 的后台 goroutine 内执行（带 background budget 上限），
+//     即便所有等待中的请求都因 sync budget 超时离开，这次预热仍会完成并写入 cache，
+//     供后续请求复用（这就是"异步补热/降级"）；
+//   - 调用方最多等待 sync budget（默认 25s），超时即返回 ("", false) 让本次请求降级，
+//     避免被上游 15min read 超时拖成首字节超长卡顿。
+//
+// 返回 (responseID, ok)。ok=false 表示本次未拿到 id，调用方应降级继续（不带 previous_response_id）。
+func (s *OpenAIGatewayService) ensureOpenAIPrewarmSessionForRequest(
+	ctx context.Context,
+	groupIDs []int64,
+	account *Account,
+	model string,
+) (string, bool) {
+	if s == nil || account == nil {
+		return "", false
+	}
+	key := fmt.Sprintf("prewarm:%d:%s", account.ID, normalizeOpenAIPrewarmModelKey(model))
+	ch := openAIPrewarmSessionPrewarmGroup.DoChan(key, func() (any, error) {
+		// 脱离请求生命周期：用 WithoutCancel 切断与调用方 ctx 的取消传播，
+		// 再叠加一个独立的 background budget，保证预热能在后台跑完写 cache。
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.openAIPrewarmSessionBackgroundBudget())
+		defer cancel()
+		return s.performOpenAIWSPrewarmSession(bgCtx, groupIDs, account, model)
+	})
+
+	budget := time.NewTimer(s.openAIPrewarmSessionSyncBudget())
+	defer budget.Stop()
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return "", false
+		}
+		id, _ := res.Val.(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return "", false
+		}
+		return id, true
+	case <-budget.C:
+		logOpenAIWSModeInfo(
+			"prewarm_session_sync_budget_exceeded account_id=%d model=%s budget_ms=%d action=degrade_async_refill",
+			account.ID, normalizeOpenAIPrewarmModelKey(model), s.openAIPrewarmSessionSyncBudget().Milliseconds(),
+		)
+		return "", false
+	case <-ctx.Done():
+		return "", false
+	}
+}
+
 // resolveOpenAIPrewarmToken 解析账号的上游 token（OAuth 优先 TokenProvider 缓存）。
 func (s *OpenAIGatewayService) resolveOpenAIPrewarmToken(ctx context.Context, account *Account) (string, error) {
 	if account == nil {

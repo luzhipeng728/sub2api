@@ -48,6 +48,15 @@ const (
 	// defaultResponseHeaderTimeout: 默认等待响应头超时时间（5分钟）
 	// LLM 请求可能排队较久，需要较长超时
 	defaultResponseHeaderTimeout = 300 * time.Second
+	// defaultDialTimeout: 默认 TCP 拨号超时时间（10秒）
+	// 防止连不上的坏账号（IP 不可达/被墙）无限挂死，快速失败以触发账号切换
+	defaultDialTimeout = 10 * time.Second
+	// defaultTLSHandshakeTimeout: 默认 TLS 握手超时时间（10秒）
+	// 防止握手挂死无上限
+	defaultTLSHandshakeTimeout = 10 * time.Second
+	// defaultOpenAIResponseHeaderTimeout: OpenAI/Codex 上游默认首字节(响应头)超时（60秒）
+	// 让"连得上但卡住不返回"的坏账号快速失败并触发 failover，而非拖满客户端 context
+	defaultOpenAIResponseHeaderTimeout = 60 * time.Second
 	// defaultMaxUpstreamClients: 默认最大客户端缓存数量
 	// 超出后会淘汰最久未使用的客户端
 	defaultMaxUpstreamClients = 5000
@@ -76,6 +85,8 @@ type poolSettings struct {
 	maxConnsPerHost       int           // 每主机最大连接数（含活跃）
 	idleConnTimeout       time.Duration // 空闲连接超时时间
 	responseHeaderTimeout time.Duration // 等待响应头超时时间
+	dialTimeout           time.Duration // TCP 拨号超时时间
+	tlsHandshakeTimeout   time.Duration // TLS 握手超时时间
 }
 
 type openAIHTTP2Settings struct {
@@ -672,7 +683,9 @@ func (s *httpUpstreamService) applyProfilePoolSettings(settings poolSettings, pr
 	if profile != service.HTTPUpstreamProfileOpenAI {
 		return settings
 	}
-	settings.responseHeaderTimeout = 0
+	// 默认给 OpenAI/Codex 一个合理的首字节(响应头)超时，让卡住的上游快速失败并触发 failover，
+	// 而不是无限等待拖满客户端 context。配置 openai_response_header_timeout>0 可覆盖。
+	settings.responseHeaderTimeout = defaultOpenAIResponseHeaderTimeout
 	if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIResponseHeaderTimeout > 0 {
 		settings.responseHeaderTimeout = time.Duration(s.cfg.Gateway.OpenAIResponseHeaderTimeout) * time.Second
 	}
@@ -682,12 +695,14 @@ func (s *httpUpstreamService) applyProfilePoolSettings(settings poolSettings, pr
 // buildPoolKey 构建连接池配置键，用于检测连接池配置变更。
 func buildPoolKey(settings poolSettings, protocolMode string) string {
 	base := fmt.Sprintf(
-		"idle:%d|idle_host:%d|max:%d|idle_timeout:%s|header_timeout:%s",
+		"idle:%d|idle_host:%d|max:%d|idle_timeout:%s|header_timeout:%s|dial_timeout:%s|tls_timeout:%s",
 		settings.maxIdleConns,
 		settings.maxIdleConnsPerHost,
 		settings.maxConnsPerHost,
 		settings.idleConnTimeout,
 		settings.responseHeaderTimeout,
+		settings.dialTimeout,
+		settings.tlsHandshakeTimeout,
 	)
 	if protocolMode == "" || protocolMode == upstreamProtocolModeDefault {
 		return base
@@ -1006,8 +1021,16 @@ func defaultPoolSettings(cfg *config.Config) poolSettings {
 	maxConnsPerHost := defaultMaxConnsPerHost
 	idleConnTimeout := defaultIdleConnTimeout
 	responseHeaderTimeout := defaultResponseHeaderTimeout
+	dialTimeout := defaultDialTimeout
+	tlsHandshakeTimeout := defaultTLSHandshakeTimeout
 
 	if cfg != nil {
+		if cfg.Gateway.DialTimeoutSeconds > 0 {
+			dialTimeout = time.Duration(cfg.Gateway.DialTimeoutSeconds) * time.Second
+		}
+		if cfg.Gateway.TLSHandshakeTimeoutSeconds > 0 {
+			tlsHandshakeTimeout = time.Duration(cfg.Gateway.TLSHandshakeTimeoutSeconds) * time.Second
+		}
 		if cfg.Gateway.MaxIdleConns > 0 {
 			maxIdleConns = cfg.Gateway.MaxIdleConns
 		}
@@ -1031,6 +1054,8 @@ func defaultPoolSettings(cfg *config.Config) poolSettings {
 		maxConnsPerHost:       maxConnsPerHost,
 		idleConnTimeout:       idleConnTimeout,
 		responseHeaderTimeout: responseHeaderTimeout,
+		dialTimeout:           dialTimeout,
+		tlsHandshakeTimeout:   tlsHandshakeTimeout,
 	}
 }
 
@@ -1058,6 +1083,16 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		MaxConnsPerHost:       settings.maxConnsPerHost,
 		IdleConnTimeout:       settings.idleConnTimeout,
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
+		TLSHandshakeTimeout:   settings.tlsHandshakeTimeout,
+	}
+	// 设置带超时的 DialContext，防止坏账号拨号挂死。
+	// 注意：socks5 代理会在 ConfigureTransportProxy 中覆盖 DialContext（其内部自带 dialer），
+	// 但 net.Dialer.Timeout 仍是直连与 http/https 代理路径的拨号上限。
+	if settings.dialTimeout > 0 {
+		transport.DialContext = (&net.Dialer{
+			Timeout:   settings.dialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
 	}
 	switch protocolMode {
 	case upstreamProtocolModeOpenAIH2:
@@ -1099,6 +1134,7 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 		MaxConnsPerHost:       settings.maxConnsPerHost,
 		IdleConnTimeout:       settings.idleConnTimeout,
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
+		TLSHandshakeTimeout:   settings.tlsHandshakeTimeout,
 		// 禁用默认的 TLS，我们使用自定义的 DialTLSContext
 		ForceAttemptHTTP2: false,
 	}
@@ -1106,8 +1142,16 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 	// 根据代理类型选择合适的 TLS 指纹 Dialer
 	if proxyURL == nil {
 		// 直连：使用 TLSFingerprintDialer
+		// 传入带超时的 baseDialer，给直连场景的 TCP 拨号加上限，防止坏账号挂死。
 		slog.Debug("tls_fingerprint_transport_direct")
-		dialer := tlsfingerprint.NewDialer(profile, nil)
+		var baseDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+		if settings.dialTimeout > 0 {
+			baseDialer = (&net.Dialer{
+				Timeout:   settings.dialTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext
+		}
+		dialer := tlsfingerprint.NewDialer(profile, baseDialer)
 		transport.DialTLSContext = dialer.DialTLSContext
 	} else {
 		scheme := strings.ToLower(proxyURL.Scheme)

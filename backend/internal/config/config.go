@@ -692,6 +692,11 @@ type GatewayConfig struct {
 	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒），0表示无超时
 	// OpenAI/Codex 请求可能在上游排队较久；默认不使用通用响应头超时截断。
 	OpenAIResponseHeaderTimeout int `mapstructure:"openai_response_header_timeout"`
+	// DialTimeoutSeconds: 上游 TCP 拨号超时（秒），0 表示用默认值（10s）
+	// 防止连不上的坏账号无限挂死，快速失败以触发账号切换
+	DialTimeoutSeconds int `mapstructure:"dial_timeout_seconds"`
+	// TLSHandshakeTimeoutSeconds: 上游 TLS 握手超时（秒），0 表示用默认值（10s）
+	TLSHandshakeTimeoutSeconds int `mapstructure:"tls_handshake_timeout_seconds"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
@@ -902,6 +907,12 @@ type GatewayOpenAIWSConfig struct {
 	PrewarmSessionTTLSeconds int `mapstructure:"prewarm_session_ttl_seconds"`
 	// PrewarmSessionConcurrency: 后台 worker 并发预热数（默认 4）。
 	PrewarmSessionConcurrency int `mapstructure:"prewarm_session_concurrency"`
+	// PrewarmSessionSyncBudgetSeconds: 请求路径同步兜底预热的等待预算（秒，默认 25）。
+	// cache miss 时请求最多等待该时长拿 prewarm id；超时即降级（本次不带 previous_response_id），
+	// 后台预热继续完成并写 cache 供后续请求复用，避免单请求被 15min read 超时拖死。
+	PrewarmSessionSyncBudgetSeconds int `mapstructure:"prewarm_session_sync_budget_seconds"`
+	// PrewarmSessionBackgroundBudgetSeconds: 后台（脱离请求生命周期）预热的最大执行时长（秒，默认 60）。
+	PrewarmSessionBackgroundBudgetSeconds int `mapstructure:"prewarm_session_background_budget_seconds"`
 	// ClientReadLimitBytes: 入站客户端 WS 单帧读取上限。
 	ClientReadLimitBytes int64 `mapstructure:"client_read_limit_bytes"`
 	// HTTPBridgeEnabled: 首包过大时，保持客户端 WS，改用 HTTP Responses 上游。
@@ -1862,6 +1873,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.prewarm_session_interval_seconds", 300)
 	viper.SetDefault("gateway.openai_ws.prewarm_session_ttl_seconds", 3600)
 	viper.SetDefault("gateway.openai_ws.prewarm_session_concurrency", 4)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_sync_budget_seconds", 25)
+	viper.SetDefault("gateway.openai_ws.prewarm_session_background_budget_seconds", 60)
 	viper.SetDefault("gateway.openai_ws.client_read_limit_bytes", 64*1024*1024)
 	viper.SetDefault("gateway.openai_ws.http_bridge_enabled", true)
 	viper.SetDefault("gateway.openai_ws.http_bridge_threshold_bytes", 15*1024*1024)
@@ -2479,6 +2492,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIResponseHeaderTimeout < 0 {
 		return fmt.Errorf("gateway.openai_response_header_timeout must be non-negative")
+	}
+	if c.Gateway.DialTimeoutSeconds < 0 {
+		return fmt.Errorf("gateway.dial_timeout_seconds must be non-negative")
+	}
+	if c.Gateway.TLSHandshakeTimeoutSeconds < 0 {
+		return fmt.Errorf("gateway.tls_handshake_timeout_seconds must be non-negative")
 	}
 	if strings.TrimSpace(c.Gateway.ConnectionPoolIsolation) != "" {
 		switch c.Gateway.ConnectionPoolIsolation {

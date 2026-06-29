@@ -96,7 +96,7 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileDefaultsToHTTP2AndNoHeaderTimeout()
 	require.NoError(s.T(), err)
 	transport, ok := entry.client.Transport.(*http.Transport)
 	require.True(s.T(), ok, "expected *http.Transport")
-	require.Equal(s.T(), time.Duration(0), transport.ResponseHeaderTimeout, "OpenAI profile should not inherit generic header timeout")
+	require.Equal(s.T(), defaultOpenAIResponseHeaderTimeout, transport.ResponseHeaderTimeout, "OpenAI profile should use its own default header timeout, not inherit the generic 600s")
 	require.True(s.T(), transport.ForceAttemptHTTP2, "OpenAI profile should prefer HTTP/2")
 	require.Equal(s.T(), upstreamProtocolModeOpenAIH2, entry.protocolMode)
 }
@@ -129,7 +129,7 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileTLSFingerprintDoesNotInheritGeneric
 	require.NoError(s.T(), err)
 	transport, ok := entry.client.Transport.(*http.Transport)
 	require.True(s.T(), ok, "expected *http.Transport")
-	require.Equal(s.T(), time.Duration(0), transport.ResponseHeaderTimeout, "OpenAI TLS path should not inherit generic header timeout")
+	require.Equal(s.T(), defaultOpenAIResponseHeaderTimeout, transport.ResponseHeaderTimeout, "OpenAI TLS path should use its own default header timeout, not inherit the generic 600s")
 }
 
 func (s *HTTPUpstreamSuite) TestOpenAIProfileHTTP2DisabledUsesHTTP1Transport() {

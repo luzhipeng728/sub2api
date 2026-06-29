@@ -37,6 +37,10 @@ const (
 	// Service 层在 SingleAccountRetry 模式下已做充分原地重试（最多 3 次、总等待 30s），
 	// Handler 层只需短暂间隔后重新进入 Service 层即可。
 	singleAccountBackoffDelay = 2 * time.Second
+	// defaultFailoverBudget 整个 failover 循环的墙钟总预算。
+	// 防止"逐账号串行吃满超时"(每次 = 选号 Redis+DB + 拨号 + 首字节等待 + 重试间隔)在最坏情况下
+	// 无界累加成数十秒首字节。超预算即停止继续切换，返回错误，让客户端快速失败而非长时间挂起。
+	defaultFailoverBudget = 90 * time.Second
 )
 
 // FailoverState 跨循环迭代共享的 failover 状态
@@ -48,6 +52,8 @@ type FailoverState struct {
 	LastFailoverErr       *service.UpstreamFailoverError
 	ForceCacheBilling     bool
 	hasBoundSession       bool
+	// Deadline 是整个 failover 循环的墙钟截止时间（零值表示不限）。
+	Deadline time.Time
 }
 
 // NewFailoverState 创建 failover 状态
@@ -57,7 +63,13 @@ func NewFailoverState(maxSwitches int, hasBoundSession bool) *FailoverState {
 		FailedAccountIDs:      make(map[int64]struct{}),
 		SameAccountRetryCount: make(map[int64]int),
 		hasBoundSession:       hasBoundSession,
+		Deadline:              time.Now().Add(defaultFailoverBudget),
 	}
+}
+
+// budgetExceeded 判断 failover 墙钟预算是否已耗尽。
+func (s *FailoverState) budgetExceeded() bool {
+	return !s.Deadline.IsZero() && time.Now().After(s.Deadline)
 }
 
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
@@ -74,6 +86,16 @@ func (s *FailoverState) HandleFailoverError(
 	// 缓存计费判断
 	if needForceCacheBilling(s.hasBoundSession, failoverErr) {
 		s.ForceCacheBilling = true
+	}
+
+	// 墙钟预算耗尽：不再重试/切换，快速失败。
+	if s.budgetExceeded() {
+		logger.FromContext(ctx).Warn("gateway.failover_budget_exceeded",
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.Int("switch_count", s.SwitchCount),
+		)
+		return FailoverExhausted
 	}
 
 	// 同账号重试：对 RetryableOnSameAccount 的临时性错误，先在同一账号上重试
@@ -132,6 +154,12 @@ func (s *FailoverState) HandleFailoverError(
 // 返回 FailoverExhausted 时，调用方应返回错误响应。
 // 返回 FailoverCanceled 时，调用方应直接 return。
 func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAction {
+	if s.budgetExceeded() {
+		logger.FromContext(ctx).Warn("gateway.failover_budget_exceeded_on_selection",
+			zap.Int("switch_count", s.SwitchCount),
+		)
+		return FailoverExhausted
+	}
 	if s.LastFailoverErr != nil &&
 		s.LastFailoverErr.StatusCode == http.StatusServiceUnavailable &&
 		s.SwitchCount <= s.MaxSwitches {
