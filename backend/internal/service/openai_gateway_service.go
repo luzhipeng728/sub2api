@@ -2828,6 +2828,28 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return nil, err
 		}
 		_, hasPreviousResponseID := wsReqBody["previous_response_id"]
+		// 账号级 prewarm session 注入（提升到 Forward 层，让 wsReqBody 直接带 previous_response_id，
+		// 这样 recover 逻辑能看到注入的 id，404 时能重新预热重试）。
+		if !hasPreviousResponseID && s.isOpenAIPrewarmSessionEnabled() {
+			groupIDForPrewarm := getOpenAIGroupIDFromContext(c)
+			prewarmID, prewarmOK := s.tryGetOpenAIPrewarmSession(ctx, groupIDForPrewarm, account, upstreamModel)
+			if !prewarmOK {
+				// 同步兜底预热（store=false 下每个 id 只能用一次，cache 可能已失效）。
+				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, upstreamModel); err == nil && newID != "" {
+					prewarmID = newID
+					prewarmOK = true
+				}
+			}
+			if prewarmOK {
+				wsReqBody["previous_response_id"] = prewarmID
+				ensureOpenAIPrewarmContinuationInput(wsReqBody, upstreamModel)
+				logOpenAIWSModeInfo(
+					"prewarm_session_inject account_id=%d model=%s response_id=%s",
+					account.ID, normalizeOpenAIPrewarmModelKey(upstreamModel),
+					truncateOpenAIWSLogValue(prewarmID, openAIWSIDValueMaxLen),
+				)
+			}
+		}
 		logOpenAIWSModeDebug(
 			"forward_start account_id=%d account_type=%s model=%s stream=%v has_previous_response_id=%v",
 			account.ID,

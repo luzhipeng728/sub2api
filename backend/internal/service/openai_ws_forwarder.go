@@ -1798,44 +1798,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
-	// prewarmInjected 标记本次请求是否注入了 prewarm response_id。注入后必须强制复用
-	// prewarm 那条 WS 连接（store=false 下 response 上下文只在连接内存活），否则会 404。
-	prewarmInjected := false
-	// 账号级 prewarm session 注入：请求本身未带 previous_response_id 且首轮尝试时，
-	// 取出 (groupID, accountID, model) 的预热 response_id 注入，让上游当作续接处理。
-	// 仅在首请求注入（wsRetryLoop 的 attempt 从 1 开始）；若上游返回 previous_response_not_found，
-	// recover 逻辑会 drop 并重试。
-	if attempt == 1 && openAIWSPayloadString(payload, "previous_response_id") == "" {
-		if s.isOpenAIPrewarmSessionEnabled() {
-			groupIDForPrewarm := getOpenAIGroupIDFromContext(c)
-			// store=false 下每个 prewarm_id 只能被成功续接一次（续接产生的新 response 不被服务端存储），
-			// 因此 cache 里的 id 可能已被消费。优先尝试 cache，未命中或不可用时同步兜底预热一个新 id。
-			prewarmID, ok := s.tryGetOpenAIPrewarmSession(ctx, groupIDForPrewarm, account, mappedModel)
-			prewarmSource := "cache"
-			if !ok {
-				// 同步兜底预热：请求路径内当场发一个空 prewarm 拿新 id。多 ~500ms 延迟，
-				// 换取每次请求都能绕过 usage_limit（绕限额是 prewarm 的核心价值）。
-				// 注意：store=false 下每个 prewarm_id 只能被成功续接一次，因此并发请求必须各自
-				// 拿独立 id（不能用 singleflight 共享，否则其余请求会因 id 被消费而 404）。
-				if newID, err := s.performOpenAIWSPrewarmSession(ctx, nil, account, mappedModel); err == nil && newID != "" {
-					prewarmID = newID
-					ok = true
-					prewarmSource = "fallback"
-				}
-			}
-			if ok {
-				payload["previous_response_id"] = prewarmID
-				ensureOpenAIPrewarmContinuationInput(payload, mappedModel)
-				prewarmInjected = true
-				logOpenAIWSModeInfo(
-					"prewarm_session_inject account_id=%d model=%s response_id=%s source=%s",
-					account.ID, normalizeOpenAIPrewarmModelKey(mappedModel),
-					truncateOpenAIWSLogValue(prewarmID, openAIWSIDValueMaxLen),
-					prewarmSource,
-				)
-			}
-		}
-	}
+	// prewarmInjected 标记本次请求是否带了 prewarm 注入的 previous_response_id。
+	// prewarm 注入已在 Forward 层完成（写入 wsReqBody，从这里复制到 payload）。
+	// 此标记用于 404 失效清理 + 成功后滚动更新。
+	prewarmInjected := s.isOpenAIPrewarmSessionEnabled() && openAIWSPayloadString(payload, "previous_response_id") != ""
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 	promptCacheKey := openAIWSPayloadString(payload, "prompt_cache_key")
