@@ -41,6 +41,10 @@ type OpenAIWSPrewarmSessionStore interface {
 	SetPrewarmSession(ctx context.Context, accountID int64, model, responseID string, ttl time.Duration) error
 	// GetPrewarmSession 读取 (accountID, model) 的预热 response_id；未命中返回 ("", false, nil)。
 	GetPrewarmSession(ctx context.Context, accountID int64, model string) (string, bool, error)
+	// ClaimPrewarmSession 原子地"读取并删除"(accountID, model) 的预热 response_id。
+	// prewarm id 是一次性消费(store=false)，必须 claim-on-read：并发请求中只有一个能拿到缓存 id，
+	// 其余返回未命中并各自铸造独立 id，从根本上避免多个请求复用同一个 id 导致 previous_response_not_found。
+	ClaimPrewarmSession(ctx context.Context, accountID int64, model string) (string, bool, error)
 	// GetPrewarmSessionWithFreshness 读取并返回新鲜度比例(剩余/总，0~1)；未命中返回 false。
 	// worker 用它判断是否需要刷新（剩余比例 < openAIWSPrewarmSessionStaleRatio 时刷新）。
 	GetPrewarmSessionWithFreshness(ctx context.Context, accountID int64, model string) (responseID string, freshness float64, ok bool, err error)
@@ -53,6 +57,8 @@ type OpenAIWSPrewarmSessionStore interface {
 type OpenAIPrewarmSessionCache interface {
 	SetPrewarmSession(ctx context.Context, key, value string, ttl time.Duration) error
 	GetPrewarmSession(ctx context.Context, key string) (value string, ttl time.Duration, err error) // ttl<=0 表示不存在
+	// ClaimPrewarmSession 原子读取并删除 key（Redis GETDEL）；不存在返回 ("", nil)。
+	ClaimPrewarmSession(ctx context.Context, key string) (value string, err error)
 	DeletePrewarmSession(ctx context.Context, key string) error
 }
 
@@ -127,6 +133,26 @@ func (s *defaultOpenAIWSPrewarmSessionStore) GetPrewarmSessionWithFreshness(ctx 
 	return value.ResponseID, freshness, true, nil
 }
 
+func (s *defaultOpenAIWSPrewarmSessionStore) ClaimPrewarmSession(ctx context.Context, accountID int64, model string) (string, bool, error) {
+	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" {
+		return "", false, nil
+	}
+	keyCtx, cancel := withOpenAIPrewarmSessionTimeout(ctx)
+	defer cancel()
+	raw, err := s.cache.ClaimPrewarmSession(keyCtx, openAIPrewarmSessionCacheKey(accountID, model))
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return "", false, nil
+	}
+	var value openAIWSPrewarmSessionValue
+	if err := json.Unmarshal([]byte(raw), &value); err != nil || strings.TrimSpace(value.ResponseID) == "" {
+		return "", false, nil
+	}
+	return value.ResponseID, true, nil
+}
+
 func (s *defaultOpenAIWSPrewarmSessionStore) DeletePrewarmSession(ctx context.Context, accountID int64, model string) error {
 	if accountID <= 0 || normalizeOpenAIPrewarmModelKey(model) == "" {
 		return nil
@@ -143,6 +169,9 @@ func (noOpOpenAIWSPrewarmSessionStore) SetPrewarmSession(context.Context, int64,
 	return nil
 }
 func (noOpOpenAIWSPrewarmSessionStore) GetPrewarmSession(context.Context, int64, string) (string, bool, error) {
+	return "", false, nil
+}
+func (noOpOpenAIWSPrewarmSessionStore) ClaimPrewarmSession(context.Context, int64, string) (string, bool, error) {
 	return "", false, nil
 }
 func (noOpOpenAIWSPrewarmSessionStore) GetPrewarmSessionWithFreshness(context.Context, int64, string) (string, float64, bool, error) {

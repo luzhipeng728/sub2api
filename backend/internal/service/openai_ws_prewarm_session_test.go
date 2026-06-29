@@ -52,6 +52,18 @@ func (c *fakePrewarmSessionCache) GetPrewarmSession(ctx context.Context, key str
 	return entry.value, remaining, nil
 }
 
+func (c *fakePrewarmSessionCache) ClaimPrewarmSession(ctx context.Context, key string) (string, error) {
+	if c.err != nil {
+		return "", c.err
+	}
+	value, _, err := c.GetPrewarmSession(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	delete(c.data, key)
+	return value, nil
+}
+
 func (c *fakePrewarmSessionCache) DeletePrewarmSession(_ context.Context, key string) error {
 	delete(c.data, key)
 	return nil

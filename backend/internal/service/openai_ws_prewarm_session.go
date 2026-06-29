@@ -368,7 +368,9 @@ func (s *OpenAIGatewayService) tryGetOpenAIPrewarmSession(
 	if normalizedModel == "" {
 		return "", false
 	}
-	prewarmID, ok, err := prewarmStore.GetPrewarmSession(ctx, account.ID, normalizedModel)
+	// claim-on-read：原子取走缓存 id。prewarm id 一次性消费，并发请求绝不能复用同一个，
+	// 否则只有一个能续接、其余全部 previous_response_not_found。取不到的请求会各自铸造独立 id。
+	prewarmID, ok, err := prewarmStore.ClaimPrewarmSession(ctx, account.ID, normalizedModel)
 	if err != nil || !ok || strings.TrimSpace(prewarmID) == "" {
 		return "", false
 	}

@@ -59,6 +59,21 @@ func (c *prewarmSessionCache) GetPrewarmSession(ctx context.Context, key string)
 	return value, ttl, nil
 }
 
+func (c *prewarmSessionCache) ClaimPrewarmSession(ctx context.Context, key string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	// GETDEL：原子读取并删除，保证一次性消费的 prewarm id 不会被并发请求重复取到。
+	value, err := c.rdb.GetDel(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", err
+	}
+	return value, nil
+}
+
 func (c *prewarmSessionCache) DeletePrewarmSession(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
