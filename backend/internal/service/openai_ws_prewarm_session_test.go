@@ -156,10 +156,10 @@ func TestEnsureOpenAIPrewarmContinuationInput_RemovesSystemMessages(t *testing.T
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
-	require.Equal(t, "hi", payload["instructions"])
+	require.Equal(t, " ", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
-	require.Len(t, input, 1, "input 应有最小 user 占位")
+	require.Len(t, input, 1)
 }
 
 func TestEnsureOpenAIPrewarmContinuationInput_NoSystemNoChange(t *testing.T) {
@@ -169,7 +169,7 @@ func TestEnsureOpenAIPrewarmContinuationInput_NoSystemNoChange(t *testing.T) {
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
-	require.Equal(t, "hi", payload["instructions"])
+	require.Equal(t, " ", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
 	require.Len(t, input, 1)
@@ -179,7 +179,7 @@ func TestEnsureOpenAIPrewarmContinuationInput_StringInput(t *testing.T) {
 	// input 是字符串时，转进 instructions，input 清空。
 	payload := map[string]any{"input": "hello world"}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
-	require.Equal(t, "hello world", payload["instructions"])
+	require.Equal(t, " ", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
 	require.Len(t, input, 1)
@@ -194,7 +194,7 @@ func TestEnsureOpenAIPrewarmContinuationInput_PreservesAssistantItems(t *testing
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
-	require.Equal(t, "question", payload["instructions"])
+	require.Equal(t, " ", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
 	require.Len(t, input, 1)

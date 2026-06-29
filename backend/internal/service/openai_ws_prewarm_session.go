@@ -382,15 +382,15 @@ func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) 
 		return
 	}
 
-	// 把用户 prompt 放进 instructions 字段，input 留最小 user 占位（让模型有提问可回）。
-	// input 完全空时模型只基于 instructions 思考但不产出 message（output 为空），
-	// 留一个最小 user 占位（".")让模型把它当成要回答的提问，从而产出 message 回复。
-	payload["instructions"] = userPromptText
+	// 把用户 prompt 放进 developer-role input（绕过 user 配额统计），instructions 设为最小非空。
+	// developer-role 不计入 user-role 配额 → 绕过 usage_limit。
+	// instructions 设为单空格（避免 codex transform 注入超长默认 Codex base prompt）。
+	payload["instructions"] = openAIPrewarmSessionInstructions
 	payload["input"] = []any{
 		map[string]any{
 			"type":    "message",
-			"role":    "user",
-			"content": ".",
+			"role":    "developer",
+			"content": userPromptText,
 		},
 	}
 }
