@@ -421,6 +421,12 @@ func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) 
 	})
 	finalInput = append(finalInput, filtered...)
 	payload["input"] = finalInput
+	// prewarm 续接时覆盖 instructions 为最小非空值（单空格）：
+	// codex transform 在此之前可能已注入超长默认 Codex base prompt（伪装官方客户端），
+	// 但 prewarm 续接场景下用户的 prompt 已转成 developer-role，不需要 Codex 人设指令，
+	// 超长 instructions 反而让模型困惑（扮演 Codex 但无真实编码任务 → 空输出）。
+	// 设为非空让模型只关注 developer-role 的用户 prompt。
+	payload["instructions"] = openAIPrewarmSessionInstructions
 }
 
 // extractOpenAIWSInputItemText 从一个 input item（map）中提取纯文本内容。
