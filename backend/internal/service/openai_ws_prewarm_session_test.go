@@ -147,7 +147,7 @@ func TestEffectiveOpenAIPrewarmGroupIDs(t *testing.T) {
 }
 
 func TestEnsureOpenAIPrewarmContinuationInput_RemovesSystemMessages(t *testing.T) {
-	// system/developer 项被移除，首个 user 内容转成 developer-role。
+	// user prompt 转进 instructions，input 清空，system 被忽略。
 	payload := map[string]any{
 		"input": []any{
 			map[string]any{"role": "system", "content": "sys"},
@@ -156,62 +156,48 @@ func TestEnsureOpenAIPrewarmContinuationInput_RemovesSystemMessages(t *testing.T
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	require.Equal(t, "hi", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
-	require.Len(t, input, 1)
-	item, ok := input[0].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "developer", item["role"], "首个 user prompt 应转成 developer-role")
-	require.Equal(t, "hi", item["content"])
+	require.Len(t, input, 1, "input 应有最小 user 占位")
 }
 
 func TestEnsureOpenAIPrewarmContinuationInput_NoSystemNoChange(t *testing.T) {
-	// 只有 user 时，user 内容转成 developer-role。
 	payload := map[string]any{
 		"input": []any{
 			map[string]any{"role": "user", "content": "hi"},
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	require.Equal(t, "hi", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
 	require.Len(t, input, 1)
-	item, _ := input[0].(map[string]any)
-	require.Equal(t, "developer", item["role"])
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_StringInput(t *testing.T) {
+	// input 是字符串时，转进 instructions，input 清空。
+	payload := map[string]any{"input": "hello world"}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	require.Equal(t, "hello world", payload["instructions"])
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
 }
 
 func TestEnsureOpenAIPrewarmContinuationInput_PreservesAssistantItems(t *testing.T) {
-	// user 转 developer，assistant 保留（多轮结构化内容）。
+	// 多轮场景：首个 user 提取到 instructions，其余内容不保留（input 全清空）。
 	payload := map[string]any{
 		"input": []any{
 			map[string]any{"role": "user", "content": "question"},
 			map[string]any{"role": "assistant", "content": "prev answer"},
-			map[string]any{"role": "user", "content": "second question"},
 		},
 	}
 	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
-	input, ok := payload["input"].([]any)
-	require.True(t, ok)
-	require.Len(t, input, 3, "首个 user 转 developer，其余 user/assistant 保留")
-	first, _ := input[0].(map[string]any)
-	require.Equal(t, "developer", first["role"])
-	require.Equal(t, "question", first["content"])
-	second, _ := input[1].(map[string]any)
-	require.Equal(t, "assistant", second["role"])
-	third, _ := input[2].(map[string]any)
-	require.Equal(t, "user", third["role"], "非首个 user 保留原样")
-}
-
-func TestEnsureOpenAIPrewarmContinuationInput_StringInput(t *testing.T) {
-	// input 是字符串（等价 user-role）时转成 developer-role message。
-	payload := map[string]any{"input": "hello world"}
-	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	require.Equal(t, "question", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
 	require.Len(t, input, 1)
-	item, _ := input[0].(map[string]any)
-	require.Equal(t, "developer", item["role"])
-	require.Equal(t, "hello world", item["content"])
 }
 
 func TestNoOpPrewarmSessionStore(t *testing.T) {

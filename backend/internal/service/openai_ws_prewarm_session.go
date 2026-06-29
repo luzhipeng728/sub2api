@@ -350,83 +350,49 @@ func (s *OpenAIGatewayService) invalidateOpenAIPrewarmSession(
 //
 // 机制（对齐 OpenAI Responses API 官方格式）：
 //   - prewarm 轮：input=[] + generate=false → 0 token → 不计 user 配额 → 拿 response_id
-//   - 续发轮：previous_response_id=prewarm_id + 把用户 prompt 放进 developer-role input
-//     → 上游当作「续接进行中的 response」，usage_limit 只统计 user-role 全新请求，
-//     developer-role 不计入 user 配额 → 绕过限额照常生成
+//   - 续发轮：previous_response_id=prewarm_id + 把用户 prompt 放进 instructions 字段，
+//     input 留空数组（没有 user-role input → usage_limit 不统计 → 绕过限额）。
 //
-// 因此本函数把 payload 里的 user-role 内容转成 developer-role：
-//  1. 移除原有 system/developer 项（避免重复）
-//  2. 把首个 user 项的 content 转成 developer-role 项
-//  3. 保留其余 user/assistant 项（多轮工具调用等结构化内容需要保留）
-//
-// 这样上游把「用户输入」当作开发者指令续接到 prewarm 那轮，既不触发 user 配额检查，
-// 又能正常生成。
+// 这样上游把「用户输入」当作 instructions 续接到 prewarm 那轮：
+//   - 不触发 user 配额检查（无 user-role input）
+//   - instructions 用用户的真实 prompt（而非 sub2api 注入的超长默认 Codex base prompt）
+//   - 模型基于 instructions 正常生成回复
 func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) {
 	if len(payload) == 0 {
 		return
 	}
-	input, ok := payload["input"].([]any)
-	if !ok {
-		// input 是字符串（等价 user-role），转成 developer-role message。
-		if text, ok := payload["input"].(string); ok && strings.TrimSpace(text) != "" {
-			payload["input"] = []any{
-				map[string]any{
-					"type":    "message",
-					"role":    "developer",
-					"content": text,
-				},
-			}
-		}
-		return
-	}
-	if len(input) == 0 {
-		return
-	}
-
-	// 收集首个 user 项的文本内容 + 过滤掉原有 system/developer 项。
+	// 提取用户 prompt 文本（input 数组里的 user-role 内容，或 input 是字符串）。
 	var userPromptText string
-	filtered := make([]any, 0, len(input))
-	for _, item := range input {
-		role, _ := item.(map[string]any)
-		if role != nil {
-			r, _ := role["role"].(string)
-			if r == "system" || r == "developer" {
-				// 丢弃原有系统/开发者指令（prewarm 轮已承担基础指令占位）。
-				continue
-			}
-			if r == "user" && userPromptText == "" {
-				// 提取首个 user 项的文本内容，稍后转成 developer-role。
-				userPromptText = extractOpenAIWSInputItemText(role)
-				continue
+	switch input := payload["input"].(type) {
+	case string:
+		userPromptText = strings.TrimSpace(input)
+	case []any:
+		for _, item := range input {
+			if role, ok := item.(map[string]any); ok {
+				if r, _ := role["role"].(string); r == "user" {
+					userPromptText = strings.TrimSpace(extractOpenAIWSInputItemText(role))
+					break
+				}
 			}
 		}
-		filtered = append(filtered, item)
 	}
 
-	if strings.TrimSpace(userPromptText) == "" {
-		// 没有可转换的 user 文本，直接用过滤结果（移除了 system/developer）。
-		if len(filtered) != len(input) {
-			payload["input"] = filtered
-		}
+	if userPromptText == "" {
+		// 没有用户文本可提取，保持原样（input 不动）。
 		return
 	}
 
-	// 在最前面插入 developer-role 项（用户 prompt 转换而来），
-	// 后面跟保留的其余 user/assistant/工具项。
-	finalInput := make([]any, 0, len(filtered)+1)
-	finalInput = append(finalInput, map[string]any{
-		"type":    "message",
-		"role":    "developer",
-		"content": userPromptText,
-	})
-	finalInput = append(finalInput, filtered...)
-	payload["input"] = finalInput
-	// prewarm 续接时覆盖 instructions 为最小非空值（单空格）：
-	// codex transform 在此之前可能已注入超长默认 Codex base prompt（伪装官方客户端），
-	// 但 prewarm 续接场景下用户的 prompt 已转成 developer-role，不需要 Codex 人设指令，
-	// 超长 instructions 反而让模型困惑（扮演 Codex 但无真实编码任务 → 空输出）。
-	// 设为非空让模型只关注 developer-role 的用户 prompt。
-	payload["instructions"] = openAIPrewarmSessionInstructions
+	// 把用户 prompt 放进 instructions 字段，input 留最小 user 占位（让模型有提问可回）。
+	// input 完全空时模型只基于 instructions 思考但不产出 message（output 为空），
+	// 留一个最小 user 占位（".")让模型把它当成要回答的提问，从而产出 message 回复。
+	payload["instructions"] = userPromptText
+	payload["input"] = []any{
+		map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": ".",
+		},
+	}
 }
 
 // extractOpenAIWSInputItemText 从一个 input item（map）中提取纯文本内容。

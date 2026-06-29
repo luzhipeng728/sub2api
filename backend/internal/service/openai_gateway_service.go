@@ -2672,7 +2672,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			ensureCodexOAuthInstructionsField(decoded)
 			markDecodedModified()
 		} else {
-			codexResult = applyCodexOAuthTransform(decoded, isCodexCLI, isCompactRequest)
+			// prewarm session 启用时跳过默认 Codex base prompt 注入：
+			// prewarm 续接会把用户 prompt 转成 developer-role，并在 forwardOpenAIWSV2 里设置
+			// 最小 instructions，超长默认 prompt 会让模型困惑（扮演 Codex 但无编码任务→空输出）。
+			if s.isOpenAIPrewarmSessionEnabled() && wsDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+				codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{IsCodexCLI: isCodexCLI, IsCompact: isCompactRequest, SkipDefaultInstructions: true})
+				// 兜底确保 instructions 字段存在（即使 prewarm 注入未命中，也避免上游报 Instructions are required）。
+				ensureCodexOAuthInstructionsField(decoded)
+				markDecodedModified()
+			} else {
+				codexResult = applyCodexOAuthTransform(decoded, isCodexCLI, isCompactRequest)
+			}
 		}
 		if codexResult.Modified {
 			markDecodedModified()
