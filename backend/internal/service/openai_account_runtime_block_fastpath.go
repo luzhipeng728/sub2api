@@ -13,6 +13,9 @@ const (
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormMaxAccountSwitches = 1
+	// openAIWSDialFailoverCooldown: WS 握手返回账号级错误(401/403/5xx)时对该账号的冷却时长。
+	// 让坏账号(如 Cloudflare 拒绝握手 403)被短暂剔除调度并把请求 failover 到健康账号。
+	openAIWSDialFailoverCooldown = 60 * time.Second
 )
 
 func openAIAccountStateContext(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -1950,8 +1950,23 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			account.ProxyID != nil && account.Proxy != nil,
 		)
 		var dialErr *openAIWSDialError
-		if errors.As(err, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
-			s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
+		if errors.As(err, &dialErr) && dialErr != nil && dialErr.StatusCode > 0 {
+			code := dialErr.StatusCode
+			if code == http.StatusTooManyRequests {
+				// 429 维持原有语义（持久化限额信号 + 走 fallback 响应），不改动。
+				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
+			} else if code == http.StatusUnauthorized || code == http.StatusForbidden || code >= 500 {
+				// 账号级 WS 握手失败(401/403/5xx，如 Cloudflare 拒绝握手)：冷却该账号 +
+				// 返回 UpstreamFailoverError 让 handler 切换到健康账号，而不是把上游错误直接返回客户端。
+				// 仅在尚未向客户端写出任何字节时才 failover（握手阶段必然未写）。
+				s.BlockAccountScheduling(account, time.Now().Add(openAIWSDialFailoverCooldown), fmt.Sprintf("ws_dial_%d", code))
+				if c == nil || c.Writer == nil || !c.Writer.Written() {
+					return nil, &UpstreamFailoverError{
+						StatusCode:      code,
+						ResponseHeaders: cloneHeader(dialErr.ResponseHeaders),
+					}
+				}
+			}
 		}
 		return nil, wrapOpenAIWSFallback(classifyOpenAIWSAcquireError(err), err)
 	}
