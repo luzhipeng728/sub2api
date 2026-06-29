@@ -2446,7 +2446,15 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			finalResponse = sanitizeOpenAIPrewarmResponse(finalResponse)
 		}
 
-		c.Data(http.StatusOK, "application/json", finalResponse)
+		// chat compat buffered 模式：来自 ForwardAsChatCompletions 的请求，不直接写客户端，
+		// 而是把 finalResponse 存到 gin context，由调用方做 Responses→ChatCompletions 格式转换。
+		if _, isChatCompat := c.Get("openai_chat_compat_buffered"); isChatCompat {
+			c.Set("openai_chat_compat_buffered_response", finalResponse)
+			c.Set("openai_chat_compat_buffered_stream", false)
+			wroteDownstream = false // 标记未写客户端，调用方负责
+		} else {
+			c.Data(http.StatusOK, "application/json", finalResponse)
+		}
 	} else {
 		flushStreamWriter(true)
 	}

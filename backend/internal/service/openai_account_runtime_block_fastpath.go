@@ -32,6 +32,22 @@ func isOpenAIAccount(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) bool {
+	// prewarm session 启用时，跳过上游错误处理（不写 DB rate_limited、不 block、不 disable）：
+	// prewarm 的设计就是让限额账号（会返回 429）通过续接绕过限额。
+	// chat/completions 等走 HTTP 上游的路径遇到 429 时，如果不跳过，会把每个账号都
+	// 写 DB rate_limited_at → 后续所有请求（含 /v1/responses）都排除该账号 → 503。
+	// 只处理图片限流（不影响调度）。
+	if s != nil && s.isOpenAIPrewarmSessionEnabled() {
+		if isOpenAIImageRateLimitError(statusCode, responseBody) {
+			if s.rateLimitService != nil {
+				stateCtx, cancel := openAIAccountStateContext(ctx)
+				defer cancel()
+				_ = s.rateLimitService.HandleOpenAIImageRateLimit(stateCtx, account, statusCode, headers, responseBody)
+			}
+		}
+		return false
+	}
+
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 

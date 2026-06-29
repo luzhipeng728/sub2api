@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
@@ -214,6 +215,36 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		return nil, policyErr
 	}
 	responsesBody = updatedBody
+
+	// prewarm session 启用 + 账号走 WSv2 时，直接调 Forward 走 WSv2 上游（绕限额）。
+	// Forward 内部处理 prewarm 注入 + WSv2 转发 + 响应清洗。
+	// chat/completions 设 buffered 模式，Forward 把 Responses 结果存 context 而非直接写客户端，
+	// 然后这里做 Responses→ChatCompletions 格式转换后写客户端。
+	if s.isOpenAIPrewarmSessionEnabled() {
+		c.Set("openai_chat_compat_buffered", true)
+		// 强制非流式发给上游：chat compat buffered 模式需要走 forwardOpenAIWSV2 的非流式
+		// c.Data 路径（buffered 响应收集），流式路径不支持 buffered。
+		nonStreamBody := append([]byte{}, responsesBody...)
+		if updated, err := sjson.SetBytes(nonStreamBody, "stream", false); err == nil {
+			nonStreamBody = updated
+		}
+		result, ferr := s.Forward(ctx, c, account, nonStreamBody)
+		if ferr != nil {
+			return nil, ferr
+		}
+		// 从 context 取 buffered 的 Responses JSON
+		if bufferedResp, ok := c.Get("openai_chat_compat_buffered_response"); ok {
+			responsesJSON, _ := bufferedResp.([]byte)
+			if len(responsesJSON) > 0 {
+				// 把 Responses 格式转成 Chat Completions 格式写给客户端
+				chatJSON := convertResponsesToChatCompletions(responsesJSON, originalModel)
+				c.Data(http.StatusOK, "application/json", chatJSON)
+				return result, nil
+			}
+		}
+		// 如果 Forward 已经直接写了客户端（流式或缓冲未命中），直接返回
+		return result, nil
+	}
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -937,4 +968,63 @@ func buildChatStreamErrorSSE(code, message string) string {
 		return "data: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"" + code + "\",\"message\":\"upstream error\"}}\n\n"
 	}
 	return "data: " + string(payload) + "\n\n"
+}
+
+// convertResponsesToChatCompletions 把 Responses API 的非流式 JSON 转成 Chat Completions 格式。
+// 用于 prewarm 续接走 WSv2（Responses 格式）后，给 chat/completions 客户端返回兼容格式。
+func convertResponsesToChatCompletions(responsesJSON []byte, model string) []byte {
+	// 提取 output 里的 text 内容
+	texts := []string{}
+	outputArr := gjson.GetBytes(responsesJSON, "output").Array()
+	for _, item := range outputArr {
+		if item.Get("type").String() == "message" {
+			for _, content := range item.Get("content").Array() {
+				if content.Get("type").String() == "output_text" {
+					texts = append(texts, content.Get("text").String())
+				}
+			}
+		}
+	}
+	content := strings.Join(texts, "\n")
+
+	// 构建 Chat Completions 格式
+	id := gjson.GetBytes(responsesJSON, "id").String()
+	if id == "" {
+		id = "chatcmpl-" + uuid.NewString()
+	}
+	finishReason := "stop"
+	if gjson.GetBytes(responsesJSON, "status").String() == "incomplete" {
+		finishReason = "length"
+	}
+
+	// usage
+	var promptTokens, completionTokens int
+	if u := gjson.GetBytes(responsesJSON, "usage"); u.Exists() {
+		promptTokens = int(u.Get("input_tokens").Int())
+		completionTokens = int(u.Get("output_tokens").Int())
+	}
+
+	result := map[string]any{
+		"id":      id,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": content,
+				},
+				"finish_reason": finishReason,
+			},
+		},
+		"usage": map[string]any{
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      promptTokens + completionTokens,
+		},
+	}
+	out, _ := json.Marshal(result)
+	return out
 }
