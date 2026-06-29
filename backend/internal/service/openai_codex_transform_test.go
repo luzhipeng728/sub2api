@@ -8,6 +8,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestApplyCodexOAuthTransform_StripsServiceTier(t *testing.T) {
+	// ChatGPT 订阅(OAuth)的 codex 内部端点不支持 service_tier，传 flex/scale 会直接 400。
+	// codex 转换必须把 service_tier 剥掉。
+	for _, tier := range []string{"flex", "scale", "priority", "default", "auto"} {
+		reqBody := map[string]any{
+			"model":        "gpt-5.4",
+			"service_tier": tier,
+			"input":        []any{map[string]any{"type": "text", "text": "hi"}},
+		}
+		applyCodexOAuthTransform(reqBody, false, false)
+		_, exists := reqBody["service_tier"]
+		require.Falsef(t, exists, "service_tier=%s 应被剥离", tier)
+	}
+}
+
 func TestApplyCodexOAuthTransform_ToolContinuationPreservesInput(t *testing.T) {
 	// 续链场景：保留 item_reference 与 id，但不再强制 store=true。
 

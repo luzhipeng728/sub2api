@@ -101,6 +101,10 @@ var openAICodexOAuthUnsupportedFields = append([]string{
 	"top_p",
 	"frequency_penalty",
 	"presence_penalty",
+	// service_tier 是按 token 计费 API 的算力档位(auto/default/flex/scale/priority)，
+	// 只影响计费/延迟、不影响输出；ChatGPT 订阅(OAuth)的 codex 内部端点不支持，传 flex/scale 直接 400。
+	// 在 codex 转换处剥离(billing 已在更早的 requestView 处捕获)；apikey 直连真实 API 不经过此列表，保留。
+	"service_tier",
 }, openAIChatGPTInternalUnsupportedFields...)
 
 func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact bool) codexTransformResult {
