@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -396,7 +397,6 @@ func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) 
 }
 
 // extractOpenAIWSInputItemText 从一个 input item（map）中提取纯文本内容。
-// content 可能是 string，也可能是 [{type:"input_text", text:"..."}] 列表。
 func extractOpenAIWSInputItemText(item map[string]any) string {
 	if item == nil {
 		return ""
@@ -416,4 +416,49 @@ func extractOpenAIWSInputItemText(item map[string]any) string {
 		return sb.String()
 	}
 	return ""
+}
+
+// sanitizeOpenAIPrewarmResponse 清洗 prewarm 续接的非流式 JSON 响应。
+// 仅在「用户没传 previous_response_id，由 prewarm 注入」时调用：
+//   - previous_response_id → 删除（官方响应里该字段为 null 或不存在）
+//   - instructions → 删除（用户没传就不该出现，避免泄露内部空格占位）
+func sanitizeOpenAIPrewarmResponse(finalResponse []byte) []byte {
+	if len(finalResponse) == 0 {
+		return finalResponse
+	}
+	// previous_response_id 设为 null（删除字段，让 gjson 查不到 = null 语义）
+	if updated, err := sjson.DeleteBytes(finalResponse, "previous_response_id"); err == nil {
+		finalResponse = updated
+	}
+	// instructions 删除（用户没传则不出现）
+	if updated, err := sjson.DeleteBytes(finalResponse, "instructions"); err == nil {
+		finalResponse = updated
+	}
+	return finalResponse
+}
+
+// isOpenAIWSNonStandardCodexEvent 判断是否为 Codex 内部非官方事件（不应透传给客户端）。
+// 官方 Responses API stream 事件类型以 "response." 开头，codex.rate_limits 是 ChatGPT 内部事件。
+func isOpenAIWSNonStandardCodexEvent(eventType string) bool {
+	switch eventType {
+	case "codex.rate_limits":
+		return true
+	}
+	return false
+}
+
+// sanitizeOpenAIPrewarmStreamEvent 清洗 prewarm 续接的流式 SSE 事件。
+func sanitizeOpenAIPrewarmStreamEvent(message []byte) []byte {
+	if len(message) == 0 {
+		return message
+	}
+	// 清洗 response.previous_response_id
+	if updated, err := sjson.DeleteBytes(message, "response.previous_response_id"); err == nil {
+		message = updated
+	}
+	// 清洗 response.instructions
+	if updated, err := sjson.DeleteBytes(message, "response.instructions"); err == nil {
+		message = updated
+	}
+	return message
 }

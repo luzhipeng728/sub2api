@@ -1800,7 +1800,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
 	// prewarmInjected 标记本次请求是否带了 prewarm 注入的 previous_response_id。
 	// prewarm 注入已在 Forward 层完成（写入 wsReqBody，从这里复制到 payload）。
-	// 此标记用于 404 失效清理 + 成功后滚动更新。
+	// 此标记用于 404 失效清理 + 成功后滚动更新 + 响应清洗。
 	prewarmInjected := s.isOpenAIPrewarmSessionEnabled() && openAIWSPayloadString(payload, "previous_response_id") != ""
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
@@ -2345,6 +2345,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			// 在首个 token 前先缓冲事件（如 response.created），
 			// 以便上游早期断连时仍可安全回退到 HTTP，不给下游发送半截流。
 			shouldBuffer := firstTokenMs == nil && !isTokenEvent && !isTerminalEvent
+			// 过滤非官方事件（codex.rate_limits 等），prewarm 续接时不缓冲也不透传。
+			if prewarmInjected && isOpenAIWSNonStandardCodexEvent(eventType) {
+				shouldBuffer = false
+				eventCount++
+				continue
+			}
 			if shouldBuffer {
 				buffered := make([]byte, len(message))
 				copy(buffered, message)
@@ -2363,6 +2369,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				}
 			} else {
 				flushBufferedStreamEvents(eventType)
+				// 过滤非官方事件（codex.rate_limits 等），prewarm 续接时对外只发标准 Responses API 事件。
+				if prewarmInjected && isOpenAIWSNonStandardCodexEvent(eventType) {
+					eventCount++
+					continue
+				}
+				// 流式：prewarm 续接时清洗 terminal 事件的内部字段（previous_response_id/instructions），
+				// 让对外 SSE 流与官方 Responses API 一致。
+				if prewarmInjected && isOpenAIWSTerminalEvent(eventType) {
+					message = sanitizeOpenAIPrewarmStreamEvent(message)
+				}
 				emitStreamMessage(message, isTerminalEvent)
 			}
 		} else {
@@ -2419,6 +2435,15 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		populateOpenAIUsageFromResponseJSON(finalResponse, usage)
 		if responseID == "" {
 			responseID = strings.TrimSpace(gjson.GetBytes(finalResponse, "id").String())
+		}
+
+		// prewarm 续接时，清洗响应里的内部字段，让对外响应与官方 Responses API 一致：
+		// - previous_response_id：删除（隐藏 prewarm 续接机制，用户没传就不该出现）
+		// - instructions：删除（用户没传就不该出现，避免泄露内部空格占位）
+		// 注意：prewarmInjected=true 意味着 previous_response_id 是我们注入的（用户没传），
+		// 因为 Forward 层只在用户没传时才注入，所以这里无需额外判断 clientProvidedPreviousResponseID。
+		if prewarmInjected {
+			finalResponse = sanitizeOpenAIPrewarmResponse(finalResponse)
 		}
 
 		c.Data(http.StatusOK, "application/json", finalResponse)
