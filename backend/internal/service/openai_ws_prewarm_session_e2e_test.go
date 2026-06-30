@@ -57,12 +57,14 @@ func newPrewarmSessionTestAccount() *Account {
 		ID:          9001,
 		Name:        "openai-prewarm-e2e",
 		Platform:    PlatformOpenAI,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,
+		// OAuth + access_token：即时现铸 prewarm 锚点需要拿到上游 token(与生产一致)。
 		Credentials: map[string]any{
-			"api_key": "sk-test",
+			"access_token":       "oauth-test-token",
+			"chatgpt_account_id": "acct-test",
 		},
 		Extra: map[string]any{
 			"responses_websockets_v2_enabled": true,
@@ -81,23 +83,20 @@ func TestPrewarmSession_E2E_Injection(t *testing.T) {
 	// 用归一化后的 model（normalizeCodexModel 的输出）作为 store key，与注入逻辑读取的 key 对齐。
 	const normModel = "gpt-5.4"
 
+	_ = normModel
+	// 即时现铸语义:第 1 轮读到 = 现铸 prewarm 锚点(返回 prewarmID),第 2 轮 = 正式请求(返回 mainID)。
+	// 两轮共用同一 mock 连接,events 顺序消费。
 	captureConn := &openAIWSCaptureConn{
 		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"` + prewarmID + `","model":"gpt-5.1"}}`),
 			[]byte(`{"type":"response.completed","response":{"id":"` + mainID + `","model":"gpt-5.1","usage":{"input_tokens":4,"output_tokens":2}}}`),
 		},
 	}
-	svc, captureConn, prewarmStore := buildPrewarmSessionTestService(t, captureConn)
+	svc, captureConn, _ := buildPrewarmSessionTestService(t, captureConn)
 
 	ctx := context.Background()
-	groupID := int64(0)
 
-	// 预置：池中已有该账号该模型(归一化后)的 prewarm_id，且 stateStore 的 response_id→account 绑定也指向本账号。
-	require.NoError(t, prewarmStore.PushPrewarmSessionPool(ctx, account.ID, normModel, prewarmID, 8, time.Hour))
-	stateStore := svc.getOpenAIWSStateStore()
-	require.NotNil(t, stateStore)
-	require.NoError(t, stateStore.BindResponseAccount(ctx, groupID, prewarmID, account.ID, time.Hour))
-
-	// 发起正式请求（不带 previous_response_id）。请求 model 用 gpt-5.1，注入逻辑会归一化后匹配 store。
+	// 发起正式请求（不带 previous_response_id）。Forward 会即时现铸一个锚点并注入。
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
@@ -109,11 +108,11 @@ func TestPrewarmSession_E2E_Injection(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, mainID, result.RequestID)
 
-	// 断言：注入逻辑把 prewarm_id 写入了发给上游的 payload。
-	require.NotEmpty(t, captureConn.writes, "应至少有一次上游写入")
+	// 断言:正式请求把"刚现铸出来的 prewarm 锚点"作为 previous_response_id 注入。
+	require.GreaterOrEqual(t, len(captureConn.writes), 2, "应有现铸轮 + 正式轮两次上游写入")
 	lastWrite := requestToJSONString(captureConn.writes[len(captureConn.writes)-1])
 	require.Equal(t, prewarmID, gjson.Get(lastWrite, "previous_response_id").String(),
-		"正式请求未带 previous_response_id 时应注入 store 里的 prewarm_id")
+		"正式请求应注入即时现铸出来的 prewarm 锚点 id")
 }
 
 // TestPrewarmSession_E2E_NoInjectionWhenDisabled 验证：功能关闭时不注入，保持原有行为。
@@ -158,10 +157,13 @@ func TestPrewarmSession_Invalidate_OnStaleBinding(t *testing.T) {
 
 	account := newPrewarmSessionTestAccount()
 	const stalePrewarmID = "resp_stale_1"
+	const freshPrewarmID = "resp_fresh_stale_1"
 	const mainID = "resp_main_stale_1"
 
+	// 即时现铸:第 1 轮 = 现铸新锚点(freshPrewarmID),第 2 轮 = 正式请求(mainID)。
 	captureConn := &openAIWSCaptureConn{
 		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"` + freshPrewarmID + `","model":"gpt-5.1"}}`),
 			[]byte(`{"type":"response.completed","response":{"id":"` + mainID + `","model":"gpt-5.1","usage":{"input_tokens":4,"output_tokens":2}}}`),
 		},
 	}
@@ -185,7 +187,8 @@ func TestPrewarmSession_Invalidate_OnStaleBinding(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, poolLen, "失效的 prewarm id 应被 pop 丢弃")
 
-	// 正式请求应退化为「不带 previous_response_id 的普通请求」。
+	// 即时现铸语义:正式请求不复用陈旧池 id,而是现铸一个全新锚点并注入。
+	// 因此绝不会注入陈旧的 stalePrewarmID,而是注入新铸的 freshPrewarmID。
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
@@ -197,10 +200,11 @@ func TestPrewarmSession_Invalidate_OnStaleBinding(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, mainID, result.RequestID)
 
-	require.NotEmpty(t, captureConn.writes)
+	require.GreaterOrEqual(t, len(captureConn.writes), 2, "应有现铸轮 + 正式轮两次上游写入")
 	lastWrite := requestToJSONString(captureConn.writes[len(captureConn.writes)-1])
-	require.False(t, gjson.Get(lastWrite, "previous_response_id").Exists(),
-		"失效绑定清理后不应注入 previous_response_id")
+	injected := gjson.Get(lastWrite, "previous_response_id").String()
+	require.Equal(t, freshPrewarmID, injected, "应注入即时现铸的新锚点")
+	require.NotEqual(t, stalePrewarmID, injected, "绝不应注入陈旧的池 id")
 }
 
 // TestPrewarmSession_Invalidate_Explicit 验证显式失效方法直接清理绑定。

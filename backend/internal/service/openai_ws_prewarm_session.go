@@ -330,43 +330,13 @@ func openAIPrewarmPoolMaxDepth(account *Account) int {
 	return c
 }
 
-// refillOpenAIPrewarmPool 把 (account, model) 的 id 池补足到目标深度：
-// 铸造 (target-当前深度) 个独立 id 并压入池。worker 周期调用。
+// refillOpenAIPrewarmPool 已停用(no-op):改为"即时现铸"——每个请求在 Forward 层临用临铸
+// 全新空锚点(见 ensureOpenAIPrewarmSessionForRequest 调用点),不再依赖会过期的预铸池。
+// 若 worker 仍预铸进池,只会堆积无人消费、且服务端会过期的锚点并浪费握手,故直接空实现。
 func (s *OpenAIGatewayService) refillOpenAIPrewarmPool(ctx context.Context, account *Account, model string) {
-	if s == nil || account == nil {
-		return
-	}
-	store := s.getOpenAIPrewarmSessionStore()
-	if store == nil {
-		return
-	}
-	normalizedModel := normalizeOpenAIPrewarmModelKey(model)
-	if normalizedModel == "" {
-		return
-	}
-	target := openAIPrewarmPoolTargetDepth(account)
-	curLen, err := store.PrewarmSessionPoolLen(ctx, account.ID, normalizedModel)
-	if err != nil {
-		return
-	}
-	need := target - curLen
-	if need <= 0 {
-		return
-	}
-	ttl := s.openAIPrewarmSessionTTL()
-	maxDepth := openAIPrewarmPoolMaxDepth(account)
-	for i := 0; i < need; i++ {
-		if ctx.Err() != nil {
-			return
-		}
-		id, mintErr := s.performOpenAIWSPrewarmSession(ctx, account.GroupIDs, account, normalizedModel)
-		if mintErr != nil || strings.TrimSpace(id) == "" {
-			return
-		}
-		if pushErr := store.PushPrewarmSessionPool(ctx, account.ID, normalizedModel, id, maxDepth, ttl); pushErr != nil {
-			return
-		}
-	}
+	_ = ctx
+	_ = account
+	_ = model
 }
 
 // recycleOpenAIPrewarmPoolID 在续接成功后把滚动出的新 id 压回池，供后续请求复用（稳态自维持）。

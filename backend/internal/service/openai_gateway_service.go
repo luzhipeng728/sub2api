@@ -2849,16 +2849,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// 账号级 prewarm session 注入（提升到 Forward 层，让 wsReqBody 直接带 previous_response_id，
 		// 这样 recover 逻辑能看到注入的 id，404 时能重新预热重试）。
 		if !hasPreviousResponseID && s.isOpenAIPrewarmSessionEnabled() {
-			groupIDForPrewarm := getOpenAIGroupIDFromContext(c)
-			prewarmID, prewarmOK := s.tryGetOpenAIPrewarmSession(ctx, groupIDForPrewarm, account, upstreamModel)
-			if !prewarmOK {
-				// 有界兜底预热：最多等 sync budget（默认 25s），超时即降级（不带 previous_response_id），
-				// 后台预热继续完成写 cache 供后续请求复用，避免被 15min read 超时拖死首字节。
-				if newID, ok := s.ensureOpenAIPrewarmSessionForRequest(ctx, nil, account, upstreamModel); ok {
-					prewarmID = newID
-					prewarmOK = true
-				}
-			}
+			// 即时现铸:每请求临用临铸一个全新的空上下文锚点,铸好立即使用、用完即弃。
+			// 不再从池里取——池里的锚点(OpenAI in-progress 响应)有服务端短 TTL,放久会过期,
+			// 取到旧锚点会 previous_response_not_found(高压下自愈现铸也常失败→ 400)。
+			// 现铸的锚点立即续接,几乎不会过期,从根上消除 not_found。代价是每请求多 1 次握手。
+			prewarmID, prewarmOK := s.ensureOpenAIPrewarmSessionForRequest(ctx, nil, account, upstreamModel)
 			if prewarmOK {
 				wsReqBody["previous_response_id"] = prewarmID
 				ensureOpenAIPrewarmContinuationInput(wsReqBody, upstreamModel)
