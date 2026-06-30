@@ -233,7 +233,7 @@ func TestEnsureOpenAIPrewarmContinuationInput_StringInput(t *testing.T) {
 }
 
 func TestEnsureOpenAIPrewarmContinuationInput_PreservesAssistantItems(t *testing.T) {
-	// 多轮场景：首个 user 提取到 instructions，其余内容不保留（input 全清空）。
+	// 多轮场景：完整保留对话——user 转 developer(绕配额)，assistant 原样保留，顺序不变。
 	payload := map[string]any{
 		"input": []any{
 			map[string]any{"role": "user", "content": "question"},
@@ -244,7 +244,30 @@ func TestEnsureOpenAIPrewarmContinuationInput_PreservesAssistantItems(t *testing
 	require.Equal(t, " ", payload["instructions"])
 	input, ok := payload["input"].([]any)
 	require.True(t, ok)
+	require.Len(t, input, 2)
+	first := input[0].(map[string]any)
+	require.Equal(t, "developer", first["role"]) // user → developer
+	require.Equal(t, "question", first["content"])
+	second := input[1].(map[string]any)
+	require.Equal(t, "assistant", second["role"]) // assistant 原样保留
+	require.Equal(t, "prev answer", second["content"])
+}
+
+func TestEnsureOpenAIPrewarmContinuationInput_PreservesUserSystemInstructions(t *testing.T) {
+	// 用户 system 已被 codex transform 抽到 instructions：本函数不得覆盖它(此前用空格覆盖→丢 system)。
+	payload := map[string]any{
+		"instructions": "You echo tokens.",
+		"input": []any{
+			map[string]any{"role": "user", "content": "Echo this token only: CANARY_7Q4Z"},
+		},
+	}
+	ensureOpenAIPrewarmContinuationInput(payload, "gpt-5.4")
+	require.Equal(t, "You echo tokens.", payload["instructions"]) // 保住 system
+	input := payload["input"].([]any)
 	require.Len(t, input, 1)
+	first := input[0].(map[string]any)
+	require.Equal(t, "developer", first["role"])
+	require.Equal(t, "Echo this token only: CANARY_7Q4Z", first["content"])
 }
 
 func TestNoOpPrewarmSessionStore(t *testing.T) {

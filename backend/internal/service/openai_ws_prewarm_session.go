@@ -507,37 +507,58 @@ func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) 
 	if len(payload) == 0 {
 		return
 	}
-	// 提取用户 prompt 文本（input 数组里的 user-role 内容，或 input 是字符串）。
-	var userPromptText string
+
+	// 续接 input 处理原则：
+	//   - 绕配额只需把 user-role 改成 developer-role（developer 不计入 user 配额）；
+	//   - 但必须**完整保留整段对话**：所有 user/assistant/其它消息原样保留、顺序不变，
+	//     绝不能压成单条、也不能只取第一条 user（否则多轮丢失、user 内容丢失）；
+	//   - system 已在 codex transform 阶段抽到 instructions，这里**不再覆盖 instructions**，
+	//     从而保住用户的 system 指令（之前用空格覆盖会把 system 抹掉）。
 	switch input := payload["input"].(type) {
 	case string:
-		userPromptText = strings.TrimSpace(input)
+		text := strings.TrimSpace(input)
+		if text == "" {
+			break
+		}
+		payload["input"] = []any{
+			map[string]any{"type": "message", "role": "developer", "content": input},
+		}
 	case []any:
+		if len(input) == 0 {
+			break
+		}
+		converted := make([]any, 0, len(input))
 		for _, item := range input {
-			if role, ok := item.(map[string]any); ok {
-				if r, _ := role["role"].(string); r == "user" {
-					userPromptText = strings.TrimSpace(extractOpenAIWSInputItemText(role))
-					break
+			m, ok := item.(map[string]any)
+			if !ok {
+				converted = append(converted, item)
+				continue
+			}
+			role, _ := m["role"].(string)
+			switch role {
+			case "system":
+				// system 已抽到 instructions，且 OAuth codex 上游不接受 input 里的 system role；丢弃。
+				continue
+			case "user":
+				// 浅拷贝后仅把 user 改成 developer(绕配额)，内容/结构原样保留。
+				nm := make(map[string]any, len(m))
+				for k, v := range m {
+					nm[k] = v
 				}
+				nm["role"] = "developer"
+				converted = append(converted, nm)
+			default:
+				// assistant / developer / 其它角色原样保留(保住多轮上下文)。
+				converted = append(converted, m)
 			}
 		}
+		payload["input"] = converted
 	}
 
-	if userPromptText == "" {
-		// 没有用户文本可提取，保持原样（input 不动）。
-		return
-	}
-
-	// 把用户 prompt 放进 developer-role input（绕过 user 配额统计），instructions 设为最小非空。
-	// developer-role 不计入 user-role 配额 → 绕过 usage_limit。
-	// instructions 设为单空格（避免 codex transform 注入超长默认 Codex base prompt）。
-	payload["instructions"] = openAIPrewarmSessionInstructions
-	payload["input"] = []any{
-		map[string]any{
-			"type":    "message",
-			"role":    "developer",
-			"content": userPromptText,
-		},
+	// instructions 必须非空（否则上游 400 "Instructions are required"）。
+	// 有用户 system 时保留；为空时才填最小占位（不注入超长默认 Codex prompt）。
+	if instr, _ := payload["instructions"].(string); strings.TrimSpace(instr) == "" {
+		payload["instructions"] = openAIPrewarmSessionInstructions
 	}
 }
 

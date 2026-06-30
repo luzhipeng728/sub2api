@@ -2479,31 +2479,13 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
 		stateStore.BindResponseConn(responseID, lease.ConnID(), ttl)
 	}
-	// prewarm session 滚动更新：续接成功后，OpenAI 服务端会消费旧的 prewarm_id（再次续接会 404），
-	// 但本次返回了新的 response_id。把它写回 (account,model) → response_id 绑定，使后续请求
-	// 能用新 id 继续续接，session 持续滚动可用。
-	if prewarmInjected && responseID != "" && s.isOpenAIPrewarmSessionEnabled() {
-		modelKey := normalizeOpenAIPrewarmModelKey(mappedModel)
-		prewarmTTL := s.openAIPrewarmSessionTTL()
-		if prewarmStore := s.getOpenAIPrewarmSessionStore(); prewarmStore != nil {
-			// 把滚动出的新 id 压回池，供后续请求复用（稳态自维持，避免每请求都现铸 = 把握手减半）。
-			if err := prewarmStore.PushPrewarmSessionPool(ctx, account.ID, modelKey, responseID, openAIPrewarmPoolMaxDepth(account), prewarmTTL); err != nil {
-				logOpenAIWSModeInfo(
-					"prewarm_session_roll_update_fail account_id=%d model=%s new_response_id=%s cause=%s",
-					account.ID, modelKey,
-					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
-					truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
-				)
-			} else {
-				logOpenAIWSModeInfo(
-					"prewarm_session_roll_update account_id=%d model=%s old_response_id=%s new_response_id=%s",
-					account.ID, modelKey,
-					truncateOpenAIWSLogValue(openAIWSPayloadString(payload, "previous_response_id"), openAIWSIDValueMaxLen),
-					truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
-				)
-			}
-		}
-	}
+	// 【不再回收 roll 出来的 id】续接成功后产出的 new response_id 携带了**本次请求的完整上下文**，
+	// 若把它压回池供后续请求复用，会导致下一个逻辑独立的请求接到一条"带历史"的链上 →
+	// 跨请求上下文污染(cached 数千 token、答非所问、丢当前 user)。
+	// 因此这里**丢弃**该 id：每个请求只用一次性的、空上下文的 prewarm 锚点(由 worker 现铸的空 id
+	// 或请求兜底现铸),用完即弃,保证每次都是干净的单轮续接。
+	// 代价是不能靠 roll 回收省握手，但正确性优先，且已用多代理 IP 分散握手压力。
+	_ = responseID
 	if stateStore != nil && storeDisabled && sessionHash != "" {
 		stateStore.BindSessionConn(groupID, sessionHash, lease.ConnID(), s.openAIWSSessionStickyTTL())
 	}
