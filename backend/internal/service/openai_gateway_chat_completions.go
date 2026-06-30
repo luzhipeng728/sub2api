@@ -236,7 +236,16 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		if bufferedResp, ok := c.Get("openai_chat_compat_buffered_response"); ok {
 			responsesJSON, _ := bufferedResp.([]byte)
 			if len(responsesJSON) > 0 {
-				// 把 Responses 格式转成 Chat Completions 格式写给客户端
+				// 用完整转换器(apicompat)：正确处理 function_call→tool_calls、reasoning、
+				// finish_reason 等。此前用的简化版只取 output_text，导致工具调用类响应被转成空补全。
+				var rr apicompat.ResponsesResponse
+				if err := json.Unmarshal(responsesJSON, &rr); err == nil {
+					chatResp := apicompat.ResponsesToChatCompletions(&rr, originalModel)
+					c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+					c.JSON(http.StatusOK, chatResp)
+					return result, nil
+				}
+				// 解析失败兜底：退回简化转换，至少返回文本。
 				chatJSON := convertResponsesToChatCompletions(responsesJSON, originalModel)
 				c.Data(http.StatusOK, "application/json", chatJSON)
 				return result, nil
