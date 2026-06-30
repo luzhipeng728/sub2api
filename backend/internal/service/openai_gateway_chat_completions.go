@@ -173,7 +173,16 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
-		codexResult := applyCodexOAuthTransform(reqBody, false, false)
+		// prewarm 启用时跳过默认 Codex base prompt(~3840 token)注入:instructions 留给 Forward 层
+		// 按是否 prewarm 决定(prewarm 续接用最小占位/用户 system)。否则在此提前注入默认,会被
+		// prewarm 续接当作"用户 system"保留 → 每请求白白多 3840 cached。
+		// prewarm 未启用时保持原行为(注入默认),避免直连路径丢失指令。
+		var codexResult codexTransformResult
+		if s.isOpenAIPrewarmSessionEnabled() {
+			codexResult = applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{SkipDefaultInstructions: true})
+		} else {
+			codexResult = applyCodexOAuthTransform(reqBody, false, false)
+		}
 		if codexResult.NormalizedModel != "" {
 			upstreamModel = codexResult.NormalizedModel
 		}
