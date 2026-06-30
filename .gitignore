@@ -139,3 +139,4 @@ frontend/coverage/
 aicodex
 output/
 .local-data/
+uploads/
