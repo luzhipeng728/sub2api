@@ -292,8 +292,15 @@ func (s *OpenAIGatewayService) ensureOpenAIPrewarmSessionForRequest(
 	return id, true
 }
 
-// openAIPrewarmPoolTargetDepth 返回某账号 prewarm id 池的目标深度。
-// 每个并发请求需要一个独立 id，故目标深度 = 账号并发上限（下限 1）。
+// openAIPrewarmPoolMaxTargetDepth 是 worker 预填池深度的硬上限。
+// prewarm id 池在有流量时主要靠续接成功(roll-update)回收维持，worker 只需提供一个"冷启动底库"。
+// 若让 worker 按账号并发(可能高达 80)去预铸，会在空闲/冷启动时产生大量 WS 握手风暴
+// (例如 5 个账号 ×80 = 400 次握手)，把单代理出口 IP 打爆并拖慢真实请求。
+// 故把 worker 目标深度封顶在该值，超出部分由运行期 roll-update 自然补充。
+const openAIPrewarmPoolMaxTargetDepth = 16
+
+// openAIPrewarmPoolTargetDepth 返回某账号 prewarm id 池的 worker 预填目标深度。
+// = min(账号并发, 上限)，下限 1；运行期池可借 roll-update 回收超过该值。
 func openAIPrewarmPoolTargetDepth(account *Account) int {
 	if account == nil {
 		return 1
@@ -302,17 +309,25 @@ func openAIPrewarmPoolTargetDepth(account *Account) int {
 	if t < 1 {
 		t = 1
 	}
+	if t > openAIPrewarmPoolMaxTargetDepth {
+		t = openAIPrewarmPoolMaxTargetDepth
+	}
 	return t
 }
 
-// openAIPrewarmPoolMaxDepth 返回池的硬上限（给 roll-update 回填留余量，减少 worker 现铸）。
+// openAIPrewarmPoolMaxDepth 返回池(LIST)的硬上限。
+// 注意：这是运行期 roll-update 回收能填到的上限，不是 worker 预填目标。
+// 取账号并发上限：稳态有流量时，每个完成的请求把滚动出的新 id 压回池，池可自然涨到接近并发数，
+// 从而让高并发(如 80)也大多命中池、避免每请求现铸；worker 只负责冷启动预填一个较小的底库。
 func openAIPrewarmPoolMaxDepth(account *Account) int {
-	t := openAIPrewarmPoolTargetDepth(account)
-	max := t * 2
-	if max < 4 {
-		max = 4
+	if account == nil {
+		return 4
 	}
-	return max
+	c := account.Concurrency
+	if c < 4 {
+		c = 4
+	}
+	return c
 }
 
 // refillOpenAIPrewarmPool 把 (account, model) 的 id 池补足到目标深度：
