@@ -779,6 +779,24 @@ func resolveOpenAIWSFallbackErrorResponse(err error) (statusCode int, errType st
 	return statusCode, errType, clientMessage, upstreamMessage, true
 }
 
+// writeOpenAINonStreamBodyOrBuffer 写出非流式最终响应体。
+// 当处于 chat-compat buffered 模式（由 /v1/chat/completions 入口设置）时，
+// 不直接把 Responses 格式 body 写给客户端，而是存入 context，由上层转成 ChatCompletions 格式。
+// 否则：当请求走 HTTP/passthrough 路径（而非 WSv2）返回时，chat 客户端会收到没有 choices 的
+// responses 格式 body → 解析成空补全。只缓冲 200 成功响应；错误响应仍直接写。
+func (s *OpenAIGatewayService) writeOpenAINonStreamBodyOrBuffer(c *gin.Context, statusCode int, contentType string, body []byte) {
+	if statusCode == http.StatusOK && c != nil {
+		if _, isChatCompat := c.Get("openai_chat_compat_buffered"); isChatCompat {
+			buf := make([]byte, len(body))
+			copy(buf, body)
+			c.Set("openai_chat_compat_buffered_response", buf)
+			c.Set("openai_chat_compat_buffered_stream", false)
+			return
+		}
+	}
+	c.Data(statusCode, contentType, body)
+}
+
 func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context, account *Account, wsErr error) bool {
 	if c == nil || c.Writer == nil || c.Writer.Written() {
 		return false
@@ -4132,7 +4150,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 	}
-	c.Data(resp.StatusCode, contentType, body)
+	s.writeOpenAINonStreamBodyOrBuffer(c, resp.StatusCode, contentType, body)
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
 		usage:            usage,
@@ -4195,7 +4213,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 			contentType = "text/event-stream"
 		}
 	}
-	c.Data(resp.StatusCode, contentType, body)
+	s.writeOpenAINonStreamBodyOrBuffer(c, resp.StatusCode, contentType, body)
 
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
@@ -5401,7 +5419,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		}
 	}
 
-	c.Data(resp.StatusCode, contentType, body)
+	s.writeOpenAINonStreamBodyOrBuffer(c, resp.StatusCode, contentType, body)
 
 	return &openaiNonStreamingResult{
 		OpenAIUsage:      usage,
@@ -5467,7 +5485,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 			contentType = "text/event-stream"
 		}
 	}
-	c.Data(resp.StatusCode, contentType, body)
+	s.writeOpenAINonStreamBodyOrBuffer(c, resp.StatusCode, contentType, body)
 
 	return &openaiNonStreamingResult{
 		OpenAIUsage:      usage,
