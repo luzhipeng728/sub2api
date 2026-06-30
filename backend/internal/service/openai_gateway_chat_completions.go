@@ -241,6 +241,12 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 				var rr apicompat.ResponsesResponse
 				if err := json.Unmarshal(responsesJSON, &rr); err == nil {
 					chatResp := apicompat.ResponsesToChatCompletions(&rr, originalModel)
+					// 客户端要流式：把完整响应切成 SSE chunk 下发(buffered 模式上游被强制非流式,
+					// 这里合成 chat.completion.chunk 流),否则 stream=true 的客户端会收到非流式 JSON 解析失败。
+					if clientStream {
+						emitBufferedChatCompletionAsSSE(c, chatResp)
+						return result, nil
+					}
 					c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 					c.JSON(http.StatusOK, chatResp)
 					return result, nil
@@ -977,6 +983,70 @@ func buildChatStreamErrorSSE(code, message string) string {
 		return "data: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"" + code + "\",\"message\":\"upstream error\"}}\n\n"
 	}
 	return "data: " + string(payload) + "\n\n"
+}
+
+// emitBufferedChatCompletionAsSSE 把一个完整的 ChatCompletionsResponse 切成 chat.completion.chunk
+// SSE 流下发给客户端（用于 buffered 模式但客户端 stream=true 的场景：上游被强制非流式，
+// 这里合成两段 chunk + [DONE]，保证 SSE 客户端能正确解析，而不是收到一整块 JSON）。
+func emitBufferedChatCompletionAsSSE(c *gin.Context, chatResp *apicompat.ChatCompletionsResponse) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	writeChunk := func(ch apicompat.ChatCompletionsChunk) {
+		b, err := json.Marshal(ch)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+		c.Writer.Flush()
+	}
+
+	var choice apicompat.ChatChoice
+	if len(chatResp.Choices) > 0 {
+		choice = chatResp.Choices[0]
+	}
+
+	// 第 1 段：role + 内容/工具调用/推理 一次性作为 delta。
+	delta := apicompat.ChatDelta{Role: "assistant"}
+	if len(choice.Message.Content) > 0 {
+		var s string
+		if err := json.Unmarshal(choice.Message.Content, &s); err == nil && s != "" {
+			delta.Content = &s
+		}
+	}
+	if choice.Message.ReasoningContent != "" {
+		rc := choice.Message.ReasoningContent
+		delta.ReasoningContent = &rc
+	}
+	if len(choice.Message.ToolCalls) > 0 {
+		delta.ToolCalls = choice.Message.ToolCalls
+	}
+	writeChunk(apicompat.ChatCompletionsChunk{
+		ID:      chatResp.ID,
+		Object:  "chat.completion.chunk",
+		Created: chatResp.Created,
+		Model:   chatResp.Model,
+		Choices: []apicompat.ChatChunkChoice{{Index: 0, Delta: delta}},
+	})
+
+	// 第 2 段：finish chunk（携带 usage）。
+	finishReason := choice.FinishReason
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	writeChunk(apicompat.ChatCompletionsChunk{
+		ID:      chatResp.ID,
+		Object:  "chat.completion.chunk",
+		Created: chatResp.Created,
+		Model:   chatResp.Model,
+		Choices: []apicompat.ChatChunkChoice{{Index: 0, Delta: apicompat.ChatDelta{}, FinishReason: &finishReason}},
+		Usage:   chatResp.Usage,
+	})
+
+	_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+	c.Writer.Flush()
 }
 
 // convertResponsesToChatCompletions 把 Responses API 的非流式 JSON 转成 Chat Completions 格式。
