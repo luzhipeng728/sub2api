@@ -357,7 +357,7 @@ type OpenAIGatewayService struct {
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
-	// tlsFPProfileService 解析账号的 TLS 指纹 profile;WS 握手复用它伪装指纹以绕过 CF。可为 nil(测试)。
+	// tlsFPProfileService 解析账号的 TLS 指纹 profile；WS 握手复用账号配置。可为 nil(测试)。
 	tlsFPProfileService *TLSFingerprintProfileService
 
 	openaiWSPoolOnce              sync.Once

@@ -41,7 +41,7 @@ type openAIWSClientConn interface {
 }
 
 // openAIWSClientDialer 抽象 WS 建连器。
-// profile 非空时用 utls 伪装 TLS 指纹(与 HTTP 上游路一致),绕过 Cloudflare 对 WS 握手的指纹拦截;
+// profile 非空时用 utls 应用账号级 TLS ClientHello profile；
 // 为 nil 时维持 Go 原生 TLS 行为(账号未开启 TLS 指纹伪装)。
 type openAIWSClientDialer interface {
 	Dial(ctx context.Context, wsURL string, headers http.Header, proxyURL string, profile *tlsfingerprint.Profile) (openAIWSClientConn, int, http.Header, error)
