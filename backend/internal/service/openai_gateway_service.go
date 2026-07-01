@@ -498,6 +498,19 @@ func (s *OpenAIGatewayService) shouldUseOpenAIPrewarmSessionForAccount(account *
 	return !openAIQuotaWindowReset(account.Extra, "5h", now)
 }
 
+// shouldBypassHTTPIngressToOpenAIWSV2 决定 HTTP 入站请求是否升 WSv2 走 prewarm 续接绕限额。
+// prewarm 关 / 非 OAuth 账号:恒真(维持原有无条件 bypass)。
+// OAuth + prewarm 开:仅当账号 5h 接近软上限才升 WSv2(有余量时走普通 HTTP-SSE,省 prewarm 开销)。
+func (s *OpenAIGatewayService) shouldBypassHTTPIngressToOpenAIWSV2(account *Account, now time.Time) bool {
+	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIWS.PrewarmSessionEnabled {
+		return true
+	}
+	if account == nil || account.Type != AccountTypeOAuth {
+		return true
+	}
+	return s.shouldUseOpenAIPrewarmSessionForAccount(account, now)
+}
+
 // isOpenAIHTTPIngressWSV2BypassEnabled 表示是否允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游。
 func (s *OpenAIGatewayService) isOpenAIHTTPIngressWSV2BypassEnabled() bool {
 	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled
@@ -2493,7 +2506,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if clientTransport == OpenAIClientTransportHTTP &&
 		wsDecision.Transport == OpenAIUpstreamTransportHTTPSSE &&
 		s.isOpenAIHTTPIngressWSV2BypassEnabled() &&
-		s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 &&
+		s.shouldBypassHTTPIngressToOpenAIWSV2(account, time.Now()) {
 		wsDecision = OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
 			Reason:    "http_ingress_ws_v2_bypass",
