@@ -928,6 +928,9 @@ type GatewayOpenAIWSConfig struct {
 	MaxConnsPerAccount int `mapstructure:"max_conns_per_account"`
 	MinIdlePerAccount  int `mapstructure:"min_idle_per_account"`
 	MaxIdlePerAccount  int `mapstructure:"max_idle_per_account"`
+	// HandshakeMaxConcurrentPerProxy: 每个出口代理IP允许的"同时进行的WS握手数"上限。
+	// 防止突发时对单IP狂建握手→触发 Cloudflare 403 风暴。超过则排队(受 acquire 超时约束)。0=不限。
+	HandshakeMaxConcurrentPerProxy int `mapstructure:"handshake_max_concurrent_per_proxy"`
 	// DynamicMaxConnsByAccountConcurrencyEnabled: 是否按账号并发动态计算连接池上限
 	DynamicMaxConnsByAccountConcurrencyEnabled bool `mapstructure:"dynamic_max_conns_by_account_concurrency_enabled"`
 	// OAuthMaxConnsFactor: OAuth 账号连接池系数（effective=ceil(concurrency*factor)）
@@ -1890,6 +1893,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.max_conns_per_account", 128)
 	viper.SetDefault("gateway.openai_ws.min_idle_per_account", 4)
 	viper.SetDefault("gateway.openai_ws.max_idle_per_account", 12)
+	viper.SetDefault("gateway.openai_ws.handshake_max_concurrent_per_proxy", 8)
 	viper.SetDefault("gateway.openai_ws.dynamic_max_conns_by_account_concurrency_enabled", true)
 	viper.SetDefault("gateway.openai_ws.oauth_max_conns_factor", 1.0)
 	viper.SetDefault("gateway.openai_ws.apikey_max_conns_factor", 1.0)

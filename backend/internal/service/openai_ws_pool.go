@@ -557,6 +557,10 @@ type openAIWSConnPool struct {
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
 
+	// handshakeSems: 每出口代理IP的握手并发信号量(key: proxyURL, value: chan struct{})。
+	// 限制单IP同时进行的WS握手数,避免突发触发 Cloudflare 403 风暴。
+	handshakeSems sync.Map
+
 	metrics openAIWSPoolMetrics
 
 	workerStopCh chan struct{}
@@ -1495,10 +1499,39 @@ func (p *openAIWSConnPool) UnpinConn(accountID int64, connID string) {
 	ap.pinnedConns[connID] = count - 1
 }
 
+func (p *openAIWSConnPool) handshakeLimit() int {
+	if p != nil && p.cfg != nil && p.cfg.Gateway.OpenAIWS.HandshakeMaxConcurrentPerProxy > 0 {
+		return p.cfg.Gateway.OpenAIWS.HandshakeMaxConcurrentPerProxy
+	}
+	return 0
+}
+
+// acquireHandshakeSlot 限制单个出口代理IP的并发握手数。返回 release;超时/取消返回 err。
+func (p *openAIWSConnPool) acquireHandshakeSlot(ctx context.Context, proxyURL string) (func(), error) {
+	limit := p.handshakeLimit()
+	if limit <= 0 {
+		return func() {}, nil
+	}
+	v, _ := p.handshakeSems.LoadOrStore(proxyURL, make(chan struct{}, limit))
+	sem := v.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConn, error) {
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
 	}
+	// 每出口IP握手并发限制:避免突发狂建握手触发 Cloudflare 403。
+	release, err := p.acquireHandshakeSlot(ctx, req.ProxyURL)
+	if err != nil {
+		return nil, &openAIWSDialError{StatusCode: 0, Err: fmt.Errorf("handshake slot wait: %w", err)}
+	}
+	defer release()
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, req.Headers, req.ProxyURL)
 	if err != nil {
 		return nil, &openAIWSDialError{
