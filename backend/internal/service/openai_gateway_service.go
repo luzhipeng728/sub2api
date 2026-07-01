@@ -2589,11 +2589,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, errors.New("image generation disabled for group")
 	}
 
-	instructions := gjson.GetBytes(body, "instructions")
-	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && !compatMessagesBridge {
-		markPatchSet("instructions", defaultCodexSynthInstructions(reqModel))
-	}
+	// 用户未传 instructions 时,不再注入 ~5k token 的 codex base prompt。
+	// 此前这里无条件 patch 注入 defaultCodexSynthInstructions(instructions_gpt5_5.txt ~5k token),
+	// 表现为每次请求 cached≈3840;它先于 transform 执行,SkipDefaultInstructions 管不到,
+	// prewarm 续接的「删空」也删不掉(内容非空)。codex 上游对「缺省/空 instructions」完全接受
+	// (实测 cached=0),故直接留空,交由后续 ensureCodexOAuthInstructionsField / prewarm 续接处理。
 
 	billingModel := account.GetMappedModel(reqModel)
 	if billingModel != reqModel {
