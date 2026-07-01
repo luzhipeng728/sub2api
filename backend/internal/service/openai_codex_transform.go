@@ -1134,9 +1134,6 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 			if !opts.PreserveReferences {
 				continue
 			}
-			if id, ok := m["id"].(string); ok && isOpenAIResponsesGeneratedItemID(id) {
-				continue
-			}
 			newItem := make(map[string]any, len(m))
 			for key, value := range m {
 				newItem[key] = value
@@ -1165,7 +1162,7 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 		if isCodexToolCallItemType(typ) {
 			callID, ok := m["call_id"].(string)
 			if !ok || strings.TrimSpace(callID) == "" {
-				if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" && !isOpenAIResponsesGeneratedItemID(id) {
+				if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" {
 					callID = id
 					ensureCopy()
 					newItem["call_id"] = callID
@@ -1178,20 +1175,6 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 					ensureCopy()
 					newItem["call_id"] = fixedCallID
 				}
-			}
-		}
-
-		if isCodexToolCallOutputItemType(typ) {
-			if _, hasContent := m["content"]; hasContent {
-				ensureCopy()
-				if strings.TrimSpace(firstNonEmptyString(newItem["output"])) == "" {
-					if output := extractTextFromContent(m["content"]); output != "" {
-						newItem["output"] = output
-					} else if b, err := json.Marshal(m["content"]); err == nil {
-						newItem["output"] = string(b)
-					}
-				}
-				delete(newItem, "content")
 			}
 		}
 
@@ -1219,18 +1202,11 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 		if !opts.PreserveReferences {
 			ensureCopy()
 			delete(newItem, "id")
-		} else if id, ok := m["id"].(string); ok && isOpenAIResponsesGeneratedItemID(id) {
-			ensureCopy()
-			delete(newItem, "id")
 		}
 
 		filtered = append(filtered, newItem)
 	}
 	return filtered
-}
-
-func isOpenAIResponsesGeneratedItemID(id string) bool {
-	return strings.HasPrefix(strings.TrimSpace(id), "item_")
 }
 
 func isCodexToolCallItemType(typ string) bool {
