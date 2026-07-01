@@ -16,10 +16,13 @@ import (
 // 避免瞬时 N 个请求 = N 次空 prewarm（浪费连接 + 上游资源）。
 var openAIPrewarmSessionPrewarmGroup singleflight.Group
 
-// openAIPrewarmSessionInstructions 是空预热轮注入的最小非空指令。
+// openAIPrewarmSessionInstructions 是最小非空 instructions 占位。
+// 关键:必须"非空且非纯空白"——codex 端点只在 instructions 为空/纯空白时,才会自动注入它那
+// ~3840 token 的默认 Codex CLI base prompt(计入 input、被缓存)。发一个简短真实指令即可绕过该注入
+// (实测 input 4391→19、cached 3840→0),同时满足上游"Instructions are required"约束。
 // OAuth 上游要求 instructions 字段非空（否则 400 "Instructions are required"），
 // 预热轮无需真实系统提示，用单空格满足约束且尽量减少对上下文的污染。
-const openAIPrewarmSessionInstructions = " "
+const openAIPrewarmSessionInstructions = "You are a helpful coding assistant."
 
 // performOpenAIWSPrewarmSession 为指定 (account, model) 执行一次空预热：
 // 发送 generate=false 的 response.create，拿到 response_id 后持久化到

@@ -1,0 +1,95 @@
+- generic [active] [ref=f6e1]:
+  - banner [ref=f6e2]:
+    - heading "Codex 渠道监控" [level=1] [ref=f6e3]: Codex 渠道监控
+    - generic [ref=f6e5]: —
+    - generic [ref=f6e6]: 范围
+    - combobox [ref=f6e7] [cursor=pointer]:
+      - option "1h"
+      - option "6h" [selected]
+      - option "24h"
+      - option "3d"
+    - generic [ref=f6e8]: 刷新 15s
+    - button "刷新" [ref=f6e9] [cursor=pointer]
+  - generic [ref=f6e10]:
+    - generic [ref=f6e11]:
+      - generic [ref=f6e12]:
+        - generic [ref=f6e13]: 成功RPM/分
+        - generic [ref=f6e14]: —
+      - generic [ref=f6e15]:
+        - generic [ref=f6e16]: 近1时成功
+        - generic [ref=f6e17]: —
+      - generic [ref=f6e18]:
+        - generic [ref=f6e19]: 成功率
+        - generic [ref=f6e20]: —
+      - generic [ref=f6e21]:
+        - generic [ref=f6e22]: 可调度
+        - generic [ref=f6e23]: —
+      - generic [ref=f6e24]:
+        - generic [ref=f6e25]: 锁定中
+        - generic [ref=f6e26]: —
+      - generic [ref=f6e27]:
+        - generic [ref=f6e28]: 周限制
+        - generic [ref=f6e29]: —
+    - generic [ref=f6e30]:
+      - generic [ref=f6e31]:
+        - heading "🧪 账号64 周用量爬升(实验)" [level=2] [ref=f6e32]
+        - generic [ref=f6e33]:
+          - generic [ref=f6e34]:
+            - generic [ref=f6e35]: 开始
+            - generic [ref=f6e36]: —
+          - generic [ref=f6e37]:
+            - generic [ref=f6e38]: 已运行
+            - generic [ref=f6e39]: —
+          - generic [ref=f6e40]:
+            - generic [ref=f6e41]: 并发
+            - generic [ref=f6e42]: —
+          - generic [ref=f6e43]:
+            - generic [ref=f6e44]: 周用量
+            - generic [ref=f6e45]: —
+          - generic [ref=f6e46]:
+            - generic [ref=f6e47]: 5h
+            - generic [ref=f6e48]: —
+          - generic [ref=f6e49]:
+            - generic [ref=f6e50]: 5h重置
+            - generic [ref=f6e51]: —
+          - generic [ref=f6e52]:
+            - generic [ref=f6e53]: 周重置
+            - generic [ref=f6e54]: —
+          - generic [ref=f6e55]:
+            - generic [ref=f6e56]: 数据更新
+            - generic [ref=f6e57]: —
+          - generic [ref=f6e58]:
+            - generic [ref=f6e59]: 速率(近程)
+            - generic [ref=f6e60]: —
+          - generic [ref=f6e61]:
+            - generic [ref=f6e62]: 预计到周限制
+            - generic [ref=f6e63]: —
+          - generic [ref=f6e64]:
+            - generic [ref=f6e65]: 本周请求
+            - generic [ref=f6e66]: —
+          - generic [ref=f6e67]:
+            - generic [ref=f6e68]: 本周成本$
+            - generic [ref=f6e69]: —
+      - heading "成功 / 429 / dial_403 / not_found(次数对比)" [level=2] [ref=f6e72]
+    - generic [ref=f6e74]:
+      - heading "💰 渠道38 刷量金额趋势($/分)" [level=2] [ref=f6e75]
+      - generic [ref=f6e76]:
+        - generic [ref=f6e77]:
+          - generic [ref=f6e78]: 当前 $/分
+          - generic [ref=f6e79]: —
+        - generic [ref=f6e80]:
+          - generic [ref=f6e81]: 预估 $/小时
+          - generic [ref=f6e82]: —
+        - generic [ref=f6e83]:
+          - generic [ref=f6e84]: 预估 $/天
+          - generic [ref=f6e85]: —
+        - generic [ref=f6e86]:
+          - generic [ref=f6e87]: 记录起累计 $
+          - generic [ref=f6e88]: —
+        - generic [ref=f6e89]:
+          - generic [ref=f6e90]: 渠道总累计 $
+          - generic [ref=f6e91]: —
+        - generic [ref=f6e92]:
+          - generic [ref=f6e93]: 起始记录时间
+          - generic [ref=f6e94]: —
+    - heading "账号实时用量 + 成功统计" [level=2] [ref=f6e97]

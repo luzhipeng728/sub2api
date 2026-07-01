@@ -1,0 +1,111 @@
+- generic [active] [ref=f4e1]:
+  - banner [ref=f4e2]:
+    - heading "Codex 渠道监控" [level=1] [ref=f4e3]: Codex 渠道监控
+    - generic [ref=f4e5]: —
+    - generic [ref=f4e6]: 范围
+    - combobox [ref=f4e7] [cursor=pointer]:
+      - option "1h"
+      - option "6h" [selected]
+      - option "24h"
+      - option "3d"
+    - generic [ref=f4e8]: 刷新 15s
+    - button "刷新" [ref=f4e9] [cursor=pointer]
+  - generic [ref=f4e10]:
+    - generic [ref=f4e11]:
+      - generic [ref=f4e12]:
+        - generic [ref=f4e13]: 成功RPM/分
+        - generic [ref=f4e14]: —
+      - generic [ref=f4e15]:
+        - generic [ref=f4e16]: 近1时成功
+        - generic [ref=f4e17]: —
+      - generic [ref=f4e18]:
+        - generic [ref=f4e19]: 成功率
+        - generic [ref=f4e20]: —
+      - generic [ref=f4e21]:
+        - generic [ref=f4e22]: 可调度
+        - generic [ref=f4e23]: —
+      - generic [ref=f4e24]:
+        - generic [ref=f4e25]: 锁定中
+        - generic [ref=f4e26]: —
+      - generic [ref=f4e27]:
+        - generic [ref=f4e28]: 周限制
+        - generic [ref=f4e29]: —
+    - generic [ref=f4e30]:
+      - generic [ref=f4e31]:
+        - heading "🧪 账号64 周用量爬升(实验)" [level=2] [ref=f4e32]
+        - generic [ref=f4e33]:
+          - generic [ref=f4e34]:
+            - generic [ref=f4e35]: 开始
+            - generic [ref=f4e36]: —
+          - generic [ref=f4e37]:
+            - generic [ref=f4e38]: 已运行
+            - generic [ref=f4e39]: —
+          - generic [ref=f4e40]:
+            - generic [ref=f4e41]: 并发
+            - generic [ref=f4e42]: —
+          - generic [ref=f4e43]:
+            - generic [ref=f4e44]: 周用量
+            - generic [ref=f4e45]: —
+          - generic [ref=f4e46]:
+            - generic [ref=f4e47]: 5h
+            - generic [ref=f4e48]: —
+          - generic [ref=f4e49]:
+            - generic [ref=f4e50]: 5h重置
+            - generic [ref=f4e51]: —
+          - generic [ref=f4e52]:
+            - generic [ref=f4e53]: 周重置
+            - generic [ref=f4e54]: —
+          - generic [ref=f4e55]:
+            - generic [ref=f4e56]: 数据更新
+            - generic [ref=f4e57]: —
+          - generic [ref=f4e58]:
+            - generic [ref=f4e59]: 速率(近程)
+            - generic [ref=f4e60]: —
+          - generic [ref=f4e61]:
+            - generic [ref=f4e62]: 预计到周限制
+            - generic [ref=f4e63]: —
+          - generic [ref=f4e64]:
+            - generic [ref=f4e65]: 本周请求
+            - generic [ref=f4e66]: —
+          - generic [ref=f4e67]:
+            - generic [ref=f4e68]: 本周成本$
+            - generic [ref=f4e69]: —
+      - heading "成功 / 429 / dial_403 / not_found(次数对比)" [level=2] [ref=f4e72]
+    - generic [ref=f4e74]:
+      - heading "💰 渠道38 刷量金额趋势($/分)" [level=2] [ref=f4e75]
+      - generic [ref=f4e76]:
+        - generic [ref=f4e77]:
+          - generic [ref=f4e78]: 当前 $/分
+          - generic [ref=f4e79]: —
+        - generic [ref=f4e80]:
+          - generic [ref=f4e81]: 预估 $/小时
+          - generic [ref=f4e82]: —
+        - generic [ref=f4e83]:
+          - generic [ref=f4e84]: 预估 $/天
+          - generic [ref=f4e85]: —
+        - generic [ref=f4e86]:
+          - generic [ref=f4e87]: 记录起累计 $
+          - generic [ref=f4e88]: —
+        - generic [ref=f4e89]:
+          - generic [ref=f4e90]: 渠道总累计 $
+          - generic [ref=f4e91]: —
+        - generic [ref=f4e92]:
+          - generic [ref=f4e93]: 起始记录时间
+          - generic [ref=f4e94]: —
+    - generic [ref=f4e96]:
+      - heading "账号实时用量 + 成功统计" [level=2] [ref=f4e97]
+      - table [ref=f4e98]:
+        - rowgroup [ref=f4e99]:
+          - row "id 名称 并发 代理 状态 近1分成功 近1时成功 近1时429 周用量 5h 周重置" [ref=f4e100]:
+            - columnheader "id" [ref=f4e101]
+            - columnheader "名称" [ref=f4e102]
+            - columnheader "并发" [ref=f4e103]
+            - columnheader "代理" [ref=f4e104]
+            - columnheader "状态" [ref=f4e105]
+            - columnheader "近1分成功" [ref=f4e106]
+            - columnheader "近1时成功" [ref=f4e107]
+            - columnheader "近1时429" [ref=f4e108]
+            - columnheader "周用量" [ref=f4e109]
+            - columnheader "5h" [ref=f4e110]
+            - columnheader "周重置" [ref=f4e111]
+        - rowgroup
