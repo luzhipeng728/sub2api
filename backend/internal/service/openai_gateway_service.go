@@ -2479,6 +2479,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			Reason:    "http_ingress_ws_v2_bypass",
 		}
 	}
+	// 诊断:HTTP 入站的最终 transport 决策(定位 HTTP 客户端为何未升 WSv2/未吃 bypass)。仅 HTTP 入站打点,低量。
+	if clientTransport == OpenAIClientTransportHTTP {
+		logOpenAIWSModeInfo(
+			"http_ingress_decision account_id=%d account_type=%s final_transport=%s reason=%s bypass_flag=%v raw_resolve=%s",
+			account.ID, account.Type, wsDecision.Transport, wsDecision.Reason,
+			s.isOpenAIHTTPIngressWSV2BypassEnabled(),
+			s.getOpenAIWSProtocolResolver().Resolve(account).Transport,
+		)
+	}
 	if c != nil {
 		c.Set("openai_ws_transport_decision", string(wsDecision.Transport))
 		c.Set("openai_ws_transport_reason", wsDecision.Reason)
@@ -2699,7 +2708,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				ensureCodexOAuthInstructionsField(decoded)
 				markDecodedModified()
 			} else {
-				codexResult = applyCodexOAuthTransform(decoded, isCodexCLI, isCompactRequest)
+				// 与 prewarm/compat 分支一致:codex OAuth 一律不注入默认 base prompt(用户没传 instructions 就不加)。
+				// 否则 HTTP-SSE 直连路径会把 ~5k token 的 codex base prompt 写进 instructions,表现为 cached≈3840。
+				// codex 上游对「缺省/空 instructions」完全接受(实测 cached=0),故省略无副作用。
+				codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{IsCodexCLI: isCodexCLI, IsCompact: isCompactRequest, SkipDefaultInstructions: true})
 			}
 		}
 		if codexResult.Modified {
