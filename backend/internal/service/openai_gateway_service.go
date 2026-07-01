@@ -478,6 +478,26 @@ func (s *OpenAIGatewayService) isOpenAIPrewarmSessionEnabled() bool {
 	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.PrewarmSessionEnabled && s.getOpenAIPrewarmSessionStore() != nil
 }
 
+func (s *OpenAIGatewayService) shouldUseOpenAIPrewarmSessionForAccount(account *Account, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	used5h := codexUsedPercentFromExtra(account, "codex_5h_used_percent")
+	if used5h < 0 {
+		return false
+	}
+	softLimit := 95.0
+	if s != nil {
+		if cfg := s.schedulingConfig(); cfg.Codex5hSoftLimit > 0 {
+			softLimit = cfg.Codex5hSoftLimit
+		}
+	}
+	if used5h < softLimit {
+		return false
+	}
+	return !openAIQuotaWindowReset(account.Extra, "5h", now)
+}
+
 // isOpenAIHTTPIngressWSV2BypassEnabled 表示是否允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游。
 func (s *OpenAIGatewayService) isOpenAIHTTPIngressWSV2BypassEnabled() bool {
 	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled
@@ -2860,7 +2880,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		_, hasPreviousResponseID := wsReqBody["previous_response_id"]
 		// 账号级 prewarm session 注入（提升到 Forward 层，让 wsReqBody 直接带 previous_response_id，
 		// 这样 recover 逻辑能看到注入的 id，404 时能重新预热重试）。
-		if !hasPreviousResponseID && s.isOpenAIPrewarmSessionEnabled() {
+		if !hasPreviousResponseID &&
+			s.isOpenAIPrewarmSessionEnabled() &&
+			s.shouldUseOpenAIPrewarmSessionForAccount(account, time.Now()) {
 			// 即时现铸:每请求临用临铸一个全新的空上下文锚点,铸好立即使用、用完即弃。
 			// 不再从池里取——池里的锚点(OpenAI in-progress 响应)有服务端短 TTL,放久会过期,
 			// 取到旧锚点会 previous_response_not_found(高压下自愈现铸也常失败→ 400)。
@@ -2917,7 +2939,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			// 若被 drop 的 previous_response_id 来自 prewarm session，清理失效绑定，
 			// 然后立即同步兜底预热一个新 id 写回 wsReqBody，让重试继续走续接绕限额，
 			// 而不是降级为普通请求（对限额账号会直接 429）。
-			if s.isOpenAIPrewarmSessionEnabled() {
+			if s.isOpenAIPrewarmSessionEnabled() && s.shouldUseOpenAIPrewarmSessionForAccount(account, time.Now()) {
 				s.invalidateOpenAIPrewarmSession(ctx, account, upstreamModel)
 				if newID, ok := s.ensureOpenAIPrewarmSessionForRequest(ctx, nil, account, upstreamModel); ok {
 					wsReqBody["previous_response_id"] = newID

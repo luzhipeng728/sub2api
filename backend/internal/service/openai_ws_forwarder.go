@@ -2278,12 +2278,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 		if eventType == "error" {
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
+			isRateLimitedEvent := isOpenAIWSRateLimitError(errCodeRaw, errTypeRaw, errMsgRaw)
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
 				errMsg = "Upstream websocket error"
 			}
 			fallbackReason, canFallback := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
+			if !wroteDownstream && isRateLimitedEvent {
+				canFallback = true
+			}
 			errCode, errType, errMessage := summarizeOpenAIWSErrorEventFieldsFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
 			logOpenAIWSModeInfo(
 				"error_event account_id=%d conn_id=%s idx=%d fallback_reason=%s can_fallback=%v err_code=%s err_type=%s err_message=%s",
@@ -2296,6 +2300,14 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				errType,
 				errMessage,
 			)
+			if !wroteDownstream && isRateLimitedEvent {
+				lease.MarkBroken()
+				return nil, &UpstreamFailoverError{
+					StatusCode:      http.StatusTooManyRequests,
+					ResponseBody:    append([]byte(nil), message...),
+					ResponseHeaders: cloneHeader(lease.HandshakeHeaders()),
+				}
+			}
 			if fallbackReason == "previous_response_not_found" {
 				// prewarm 注入的 id 续接失败：上游已消费/清理了该 response，必须从 store 清除，
 				// 让 worker 下个周期重新预热，否则后续请求会持续命中失效 id（404 连锁）。

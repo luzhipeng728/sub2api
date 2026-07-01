@@ -83,7 +83,7 @@ func (r *openAICodexExtraListRepo) ListWithFilters(_ context.Context, params pag
 	return r.accounts, &pagination.PaginationResult{Total: int64(len(r.accounts)), Page: params.Page, PageSize: params.PageSize}, nil
 }
 
-func TestOpenAIGatewayService_Forward_WSv2ErrorEventUsageLimitPersistsRateLimit(t *testing.T) {
+func TestOpenAIGatewayService_Forward_WSv2ErrorEventUsageLimitTriggersFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	resetAt := time.Now().Add(2 * time.Hour).Unix()
@@ -162,7 +162,10 @@ func TestOpenAIGatewayService_Forward_WSv2ErrorEventUsageLimitPersistsRateLimit(
 	result, err := svc.Forward(context.Background(), c, &account, body)
 	require.Error(t, err)
 	require.Nil(t, result)
-	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
+	require.False(t, c.Writer.Written(), "WSv2 限流 error event 应交给上层换号，不应先写 429 给客户端")
 	require.Nil(t, upstream.lastReq, "WS 限流 error event 不应回退到同账号 HTTP")
 	require.Len(t, repo.rateLimitCalls, 1)
 	require.WithinDuration(t, time.Unix(resetAt, 0), repo.rateLimitCalls[0], 2*time.Second)

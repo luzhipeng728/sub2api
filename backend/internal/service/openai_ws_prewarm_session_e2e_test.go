@@ -68,6 +68,8 @@ func newPrewarmSessionTestAccount() *Account {
 		},
 		Extra: map[string]any{
 			"responses_websockets_v2_enabled": true,
+			"codex_5h_used_percent":           100.0,
+			"codex_5h_reset_at":               time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		},
 	}
 }
@@ -147,6 +149,38 @@ func TestPrewarmSession_E2E_NoInjectionWhenDisabled(t *testing.T) {
 	lastWrite := requestToJSONString(captureConn.writes[len(captureConn.writes)-1])
 	require.False(t, gjson.Get(lastWrite, "previous_response_id").Exists(),
 		"功能关闭时不应注入 previous_response_id")
+}
+
+func TestPrewarmSession_E2E_NoInjectionWhen5hHasHeadroom(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	account := newPrewarmSessionTestAccount()
+	account.Extra["codex_5h_used_percent"] = 42.0
+	account.Extra["codex_5h_reset_at"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	const mainID = "resp_main_5h_headroom_1"
+
+	captureConn := &openAIWSCaptureConn{
+		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"` + mainID + `","model":"gpt-5.1","usage":{"input_tokens":4,"output_tokens":2}}}`),
+		},
+	}
+	svc, captureConn, _ := buildPrewarmSessionTestService(t, captureConn)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+	c.Request.Header.Set("session_id", "session-e2e-5h-headroom")
+	body := []byte(`{"model":"gpt-5.1","stream":false,"input":[{"type":"input_text","text":"hello"}]}`)
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, mainID, result.RequestID)
+
+	require.Len(t, captureConn.writes, 1, "5h 未达软限制时应直接走原生请求，不应先现铸 prewarm")
+	lastWrite := requestToJSONString(captureConn.writes[len(captureConn.writes)-1])
+	require.False(t, gjson.Get(lastWrite, "previous_response_id").Exists(),
+		"5h 未达软限制时不应注入 previous_response_id")
 }
 
 // TestPrewarmSession_Invalidate_OnStaleBinding 验证失效自愈：
