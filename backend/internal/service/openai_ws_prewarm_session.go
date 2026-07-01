@@ -16,13 +16,10 @@ import (
 // 避免瞬时 N 个请求 = N 次空 prewarm（浪费连接 + 上游资源）。
 var openAIPrewarmSessionPrewarmGroup singleflight.Group
 
-// openAIPrewarmSessionInstructions 是最小非空 instructions 占位。
-// 关键:必须"非空且非纯空白"——codex 端点只在 instructions 为空/纯空白时,才会自动注入它那
-// ~3840 token 的默认 Codex CLI base prompt(计入 input、被缓存)。发一个简短真实指令即可绕过该注入
-// (实测 input 4391→19、cached 3840→0),同时满足上游"Instructions are required"约束。
-// OAuth 上游要求 instructions 字段非空（否则 400 "Instructions are required"），
-// 预热轮无需真实系统提示，用单空格满足约束且尽量减少对上下文的污染。
-const openAIPrewarmSessionInstructions = "You are a helpful coding assistant."
+// openAIPrewarmSessionInstructions 仅用于空预热轮(锚点, generate=false)的最小占位。
+// 真实续接请求里,用户没传 instructions 时不再补占位(见 ensureOpenAIPrewarmContinuationInput),
+// 直接省略该字段转发(codex 官方接受缺省),避免"空格被当空 → codex 注入 ~3840 默认 base prompt"。
+const openAIPrewarmSessionInstructions = " "
 
 // performOpenAIWSPrewarmSession 为指定 (account, model) 执行一次空预热：
 // 发送 generate=false 的 response.create，拿到 response_id 后持久化到
@@ -528,10 +525,10 @@ func ensureOpenAIPrewarmContinuationInput(payload map[string]any, model string) 
 		payload["input"] = converted
 	}
 
-	// instructions 必须非空（否则上游 400 "Instructions are required"）。
-	// 有用户 system 时保留；为空时才填最小占位（不注入超长默认 Codex prompt）。
-	if instr, _ := payload["instructions"].(string); strings.TrimSpace(instr) == "" {
-		payload["instructions"] = openAIPrewarmSessionInstructions
+	// 用户没传 instructions 就不加(codex 官方接受缺省)。之前补单空格反而被 codex 当成空 →
+	// 触发它注入 ~3840 token 默认 base prompt。有用户 system 时(非空)保留;空/纯空白则删除该字段。
+	if instr, ok := payload["instructions"].(string); ok && strings.TrimSpace(instr) == "" {
+		delete(payload, "instructions")
 	}
 }
 
