@@ -911,10 +911,43 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if len(plan.staleSnapshotCompactRetry) > 0 && s.service.schedulerSnapshot != nil {
 			selectionOrder = append(selectionOrder, sortOpenAICompactRetryCandidates(plan.staleSnapshotCompactRetry)...)
 		}
+		if s.service.schedulingConfig().CodexFailoverProvenAlive {
+			selectionOrder = applyProvenAliveFailover(selectionOrder)
+		}
 		return selectionOrder
 	}
 
-	return buildSelectionOrder(plan.candidates)
+	order := buildSelectionOrder(plan.candidates)
+	if s.service.schedulingConfig().CodexFailoverProvenAlive {
+		order = applyProvenAliveFailover(order)
+	}
+	return order
+}
+
+// applyProvenAliveFailover 实现"两段式取号":保留 selectionOrder[0] 为首选(headroom-aware),
+// 把失败重试的尾段(下标1+)整体改按 "proven-alive" 重排——最近有成功出活(hasTTFT)且错误率
+// 低的号优先,忽略 5h/周余量。这样首选失败后,failover 会立刻跳到"此刻正在稳定出活"的号,
+// 而不是继续沿 headroom 序去撞"有余量但已死/周限"的号(如 5h=0% 但周限死的账号)。
+func applyProvenAliveFailover(order []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+	if len(order) <= 2 {
+		return order
+	}
+	out := append([]openAIAccountCandidateScore(nil), order...)
+	tail := out[1:]
+	sort.SliceStable(tail, func(i, j int) bool {
+		a, b := tail[i], tail[j]
+		if a.hasTTFT != b.hasTTFT {
+			return a.hasTTFT // 最近有出活的(有 TTFT 采样)优先
+		}
+		if a.errorRate != b.errorRate {
+			return a.errorRate < b.errorRate // 错误率低的优先
+		}
+		if a.loadInfo != nil && b.loadInfo != nil && a.loadInfo.LoadRate != b.loadInfo.LoadRate {
+			return a.loadInfo.LoadRate < b.loadInfo.LoadRate // 负载低的优先
+		}
+		return a.account.ID < b.account.ID
+	})
+	return out
 }
 
 func sortOpenAICompactRetryCandidates(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {

@@ -1096,7 +1096,11 @@ type GatewaySchedulingConfig struct {
 	// 已达软阈值(榨干)的账号沉到最后一桶,但仍在选号序列里、能接到溢出流量(不跳过)。
 	// 默认 true。Codex5hSoftLimit/Codex7dSoftLimit 为"视为榨干"的百分比阈值。
 	CodexHeadroomAware bool    `mapstructure:"codex_headroom_aware"`
-	Codex5hSoftLimit   float64 `mapstructure:"codex_5h_soft_limit"`
+	// CodexFailoverProvenAlive: 分层 failover——首选沿用 headroom-aware;失败重试(selectionOrder 下标1+)
+	// 改用"proven-alive"排序(最近有成功出活 hasTTFT + 错误率低优先,忽略 5h/周余量),从而跳出
+	// "有余量但已死/周限"的号(如 5h=0% 但周限死的账号)。默认开启。
+	CodexFailoverProvenAlive bool    `mapstructure:"codex_failover_proven_alive"`
+	Codex5hSoftLimit         float64 `mapstructure:"codex_5h_soft_limit"`
 	Codex7dSoftLimit   float64 `mapstructure:"codex_7d_soft_limit"`
 
 	// 负载计算
@@ -1964,6 +1968,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.codex_headroom_aware", true)
+	viper.SetDefault("gateway.scheduling.codex_failover_proven_alive", true)
 	viper.SetDefault("gateway.scheduling.codex_5h_soft_limit", 95.0)
 	viper.SetDefault("gateway.scheduling.codex_7d_soft_limit", 99.0)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)

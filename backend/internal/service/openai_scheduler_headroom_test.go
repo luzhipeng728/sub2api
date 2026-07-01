@@ -14,6 +14,33 @@ func headroomTestScheduler() *defaultOpenAIAccountScheduler {
 	return &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: cfg}}
 }
 
+func TestApplyProvenAliveFailover(t *testing.T) {
+	mk := func(id int64, hasTTFT bool, errorRate float64, load int) openAIAccountCandidateScore {
+		return openAIAccountCandidateScore{
+			account:   &Account{ID: id},
+			loadInfo:  &AccountLoadInfo{LoadRate: load},
+			hasTTFT:   hasTTFT,
+			errorRate: errorRate,
+		}
+	}
+	// [0]=首选(headroom,假设已死 id=1)必须保留;尾段(1+)期望按 proven-alive 重排:
+	// 有出活(hasTTFT)优先 → 其中错误率低优先 → 无出活的排最后。
+	order := []openAIAccountCandidateScore{
+		mk(1, false, 0.9, 0),  // 首选,保留在 [0]
+		mk(2, false, 0.1, 50), // 无 TTFT(近期没出活)
+		mk(3, true, 0.5, 50),  // 有 TTFT,错误率 0.5
+		mk(4, true, 0.1, 50),  // 有 TTFT,错误率 0.1 → 尾段最前
+	}
+	out := applyProvenAliveFailover(order)
+	got := []int64{out[0].account.ID, out[1].account.ID, out[2].account.ID, out[3].account.ID}
+	want := []int64{1, 4, 3, 2}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("proven-alive 排序错误: got %v want %v", got, want)
+		}
+	}
+}
+
 func TestCodexUsedPercentFromExtra(t *testing.T) {
 	a := &Account{Extra: map[string]any{"codex_5h_used_percent": float64(100), "codex_7d_used_percent": 32.0}}
 	if got := codexUsedPercentFromExtra(a, "codex_5h_used_percent"); got != 100 {
