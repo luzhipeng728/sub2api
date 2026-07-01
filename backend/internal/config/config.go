@@ -1089,6 +1089,13 @@ type GatewaySchedulingConfig struct {
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
 	PreferSoonestReset bool `mapstructure:"prefer_soonest_reset"`
 
+	// CodexHeadroomAware: 选号时按 codex 5h/周 余量分桶——余量多的账号优先派单,
+	// 已达软阈值(榨干)的账号沉到最后一桶,但仍在选号序列里、能接到溢出流量(不跳过)。
+	// 默认 true。Codex5hSoftLimit/Codex7dSoftLimit 为"视为榨干"的百分比阈值。
+	CodexHeadroomAware bool    `mapstructure:"codex_headroom_aware"`
+	Codex5hSoftLimit   float64 `mapstructure:"codex_5h_soft_limit"`
+	Codex7dSoftLimit   float64 `mapstructure:"codex_7d_soft_limit"`
+
 	// 负载计算
 	LoadBatchEnabled    bool `mapstructure:"load_batch_enabled"`
 	LoadBatchCacheTTLMS int  `mapstructure:"load_batch_cache_ttl_ms"`
@@ -1952,6 +1959,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 0)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
+	viper.SetDefault("gateway.scheduling.codex_headroom_aware", true)
+	viper.SetDefault("gateway.scheduling.codex_5h_soft_limit", 95.0)
+	viper.SetDefault("gateway.scheduling.codex_7d_soft_limit", 99.0)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)
 	viper.SetDefault("gateway.scheduling.snapshot_mget_chunk_size", 128)

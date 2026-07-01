@@ -820,11 +820,45 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	return plan
 }
 
+// codexUsedPercentFromExtra 读取账号 extra 里的 codex 用量百分比;缺失返回 -1。
+func codexUsedPercentFromExtra(a *Account, key string) float64 {
+	if a == nil || a.Extra == nil {
+		return -1
+	}
+	v, ok := a.Extra[key]
+	if !ok || v == nil {
+		return -1
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return -1
+}
+
+// isCodexAccountMaxed 判断账号 codex 5h 或周用量是否已达软阈值(视为"榨干",派单沉后)。
+func (s *defaultOpenAIAccountScheduler) isCodexAccountMaxed(a *Account) bool {
+	cfg := s.service.schedulingConfig()
+	if h5 := codexUsedPercentFromExtra(a, "codex_5h_used_percent"); h5 >= 0 && h5 >= cfg.Codex5hSoftLimit {
+		return true
+	}
+	if w7 := codexUsedPercentFromExtra(a, "codex_7d_used_percent"); w7 >= 0 && w7 >= cfg.Codex7dSoftLimit {
+		return true
+	}
+	return false
+}
+
 func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
-	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+	orderOne := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
 		if len(pool) == 0 || plan.topK <= 0 {
 			return nil
 		}
@@ -834,6 +868,30 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		}
 		ranked := selectTopKOpenAICandidates(pool, groupTopK)
 		return buildOpenAIWeightedSelectionOrder(ranked, req)
+	}
+	// buildSelectionOrder: 按 codex 5h/周 余量分两桶——有余量的排前面优先派单,
+	// 已榨干(>=软阈值)的排后面(仍在序列里、能接溢出流量,不跳过)。全同则不分桶。
+	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+		if len(pool) == 0 {
+			return nil
+		}
+		if !s.service.schedulingConfig().CodexHeadroomAware {
+			return orderOne(pool)
+		}
+		headroom := make([]openAIAccountCandidateScore, 0, len(pool))
+		maxed := make([]openAIAccountCandidateScore, 0)
+		for _, c := range pool {
+			if s.isCodexAccountMaxed(c.account) {
+				maxed = append(maxed, c)
+			} else {
+				headroom = append(headroom, c)
+			}
+		}
+		if len(headroom) == 0 || len(maxed) == 0 {
+			return orderOne(pool)
+		}
+		out := orderOne(headroom)
+		return append(out, orderOne(maxed)...)
 	}
 
 	if req.RequireCompact {
