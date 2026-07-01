@@ -35,7 +35,7 @@ func TestOpenAIRuntimeBlock_AppliesToOpenAIAPIKeyWhenRateLimitServiceStopsSchedu
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
-func TestOpenAIRuntimeBlock_PrewarmStillBlocksWSDialHardFailures(t *testing.T) {
+func TestOpenAIRuntimeBlock_PrewarmSkipsWSDialFailures(t *testing.T) {
 	svc := &OpenAIGatewayService{
 		cfg: &config.Config{
 			Gateway: config.GatewayConfig{
@@ -48,7 +48,7 @@ func TestOpenAIRuntimeBlock_PrewarmStillBlocksWSDialHardFailures(t *testing.T) {
 
 	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "ws_dial_403")
 
-	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestOpenAIRuntimeBlock_DoesNotApplyToOtherPlatforms(t *testing.T) {
