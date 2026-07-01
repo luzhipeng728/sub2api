@@ -58,8 +58,8 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 3 {
-		t.Fatalf("StickySessionMaxWaiting = %d, want 3", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
+	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 2 {
+		t.Fatalf("StickySessionMaxWaiting = %d, want 2", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
 	}
 	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 120*time.Second {
 		t.Fatalf("StickySessionWaitTimeout = %v, want 120s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"sort"
@@ -66,6 +67,13 @@ const (
 	// 被暂停的账号收不到流量，其快照永远不会从上游响应头刷新；该兜底让账号在快照
 	// 陈旧时放行一次请求，从而通过正常响应头自愈，而无需等待整个窗口（5h/7d）重置。
 	openAICodexAutoPauseStaleAfter = 2 * time.Hour
+
+	// Legacy 调度的“榨干模式”分数：同 priority 内，不只看 loadRate，也给最近没被尝试的账号补偿。
+	// 错误率只做软惩罚，不会把账号从候选池剔除。
+	openAILegacyIdleBoostMax       = 30.0
+	openAILegacyIdleBoostFullAfter = 90 * time.Second
+	openAILegacyErrorPenaltyMax    = 35.0
+	openAILegacyRecentSuccessBonus = 5.0
 )
 
 // OpenAI allowed headers whitelist (for non-passthrough).
@@ -360,6 +368,7 @@ type OpenAIGatewayService struct {
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
 	openaiSchedulerOnce           sync.Once
+	openaiAccountStatsOnce        sync.Once
 	openaiWSPassthroughDialerOnce sync.Once
 	openaiWSPool                  *openAIWSConnPool
 	openaiWSStateStore            OpenAIWSStateStore
@@ -380,6 +389,26 @@ type OpenAIGatewayService struct {
 	codexSnapshotThrottle               *accountWriteThrottle
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
+}
+
+func (s *OpenAIGatewayService) getOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
+	if s == nil {
+		return nil
+	}
+	s.openaiAccountStatsOnce.Do(func() {
+		if s.openaiAccountStats == nil {
+			s.openaiAccountStats = newOpenAIAccountRuntimeStats()
+		}
+	})
+	return s.openaiAccountStats
+}
+
+func (s *OpenAIGatewayService) reportOpenAIAccountScheduleAttempt(accountID int64) {
+	stats := s.getOpenAIAccountRuntimeStats()
+	if stats == nil {
+		return
+	}
+	stats.reportAttempt(accountID, time.Now())
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -1910,6 +1939,117 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	return s.selectAccountWithLoadAwareness(s.withOpenAIQuotaAutoPauseContext(ctx), groupID, sessionHash, requestedModel, excludedIDs, false, "")
 }
 
+func (s *OpenAIGatewayService) openAILegacyUtilizationScore(item accountWithLoad, now time.Time) float64 {
+	if item.account == nil {
+		return -1
+	}
+	loadRate := 0
+	if item.loadInfo != nil {
+		loadRate = item.loadInfo.LoadRate
+	}
+	loadHeadroom := 100.0 - clampFloat64(float64(loadRate), 0, 100)
+	idleBoost := s.openAILegacyIdleBoost(item.account, now)
+	errorPenalty := 0.0
+	successBonus := 0.0
+	if stats := s.getOpenAIAccountRuntimeStats(); stats != nil {
+		errorRate, _, hasTTFT := stats.snapshot(item.account.ID)
+		errorPenalty = clamp01(errorRate) * openAILegacyErrorPenaltyMax
+		if hasTTFT && errorRate <= 0.25 {
+			successBonus = openAILegacyRecentSuccessBonus
+		}
+	}
+	return loadHeadroom + idleBoost + successBonus - errorPenalty
+}
+
+func (s *OpenAIGatewayService) openAILegacyIdleBoost(account *Account, now time.Time) float64 {
+	if account == nil {
+		return 0
+	}
+	var last time.Time
+	if stats := s.getOpenAIAccountRuntimeStats(); stats != nil {
+		if attemptAt, ok := stats.lastAttempt(account.ID); ok {
+			last = attemptAt
+		}
+	}
+	if last.IsZero() && account.LastUsedAt != nil {
+		last = *account.LastUsedAt
+	}
+	if last.IsZero() {
+		return openAILegacyIdleBoostMax
+	}
+	if now.Before(last) {
+		return 0
+	}
+	ratio := now.Sub(last).Seconds() / openAILegacyIdleBoostFullAfter.Seconds()
+	return clamp01(ratio) * openAILegacyIdleBoostMax
+}
+
+func (s *OpenAIGatewayService) sortOpenAILegacyLoadCandidates(candidates []accountWithLoad, now time.Time) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.account.Priority != b.account.Priority {
+			return a.account.Priority < b.account.Priority
+		}
+		aScore := s.openAILegacyUtilizationScore(a, now)
+		bScore := s.openAILegacyUtilizationScore(b, now)
+		if math.Abs(aScore-bScore) > 0.0001 {
+			return aScore > bScore
+		}
+		if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
+			return a.loadInfo.LoadRate < b.loadInfo.LoadRate
+		}
+		switch {
+		case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
+			return true
+		case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
+			return false
+		case a.account.LastUsedAt == nil && b.account.LastUsedAt == nil:
+			return false
+		default:
+			return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
+		}
+	})
+	s.shuffleOpenAILegacyUtilizationTies(candidates, now)
+}
+
+func (s *OpenAIGatewayService) shuffleOpenAILegacyUtilizationTies(candidates []accountWithLoad, now time.Time) {
+	if len(candidates) <= 1 {
+		return
+	}
+	i := 0
+	for i < len(candidates) {
+		j := i + 1
+		for j < len(candidates) && s.sameOpenAILegacyUtilizationGroup(candidates[i], candidates[j], now) {
+			j++
+		}
+		if j-i > 1 {
+			rand.Shuffle(j-i, func(a, b int) {
+				candidates[i+a], candidates[i+b] = candidates[i+b], candidates[i+a]
+			})
+		}
+		i = j
+	}
+}
+
+func (s *OpenAIGatewayService) sameOpenAILegacyUtilizationGroup(a, b accountWithLoad, now time.Time) bool {
+	if a.account == nil || b.account == nil {
+		return a.account == b.account
+	}
+	if a.account.Priority != b.account.Priority {
+		return false
+	}
+	if a.loadInfo == nil || b.loadInfo == nil {
+		return a.loadInfo == b.loadInfo
+	}
+	if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
+		return false
+	}
+	if math.Abs(s.openAILegacyUtilizationScore(a, now)-s.openAILegacyUtilizationScore(b, now)) > 0.0001 {
+		return false
+	}
+	return sameLastUsedAt(a.account.LastUsedAt, b.account.LastUsedAt)
+}
+
 func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability) (*AccountSelectionResult, error) {
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -1931,6 +2071,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if err != nil {
 			return nil, err
 		}
+		s.reportOpenAIAccountScheduleAttempt(account.ID)
 		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err == nil && result != nil && result.Acquired {
 			return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
@@ -1991,6 +2132,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					} else if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 					} else {
+						s.reportOpenAIAccountScheduleAttempt(accountID)
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 						if err == nil && result != nil && result.Acquired {
 							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
@@ -2071,26 +2213,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return nil, false, nil
 		}
 
-		sort.SliceStable(available, func(i, j int) bool {
-			a, b := available[i], available[j]
-			if a.account.Priority != b.account.Priority {
-				return a.account.Priority < b.account.Priority
-			}
-			if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
-				return a.loadInfo.LoadRate < b.loadInfo.LoadRate
-			}
-			switch {
-			case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
-				return true
-			case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
-				return false
-			case a.account.LastUsedAt == nil && b.account.LastUsedAt == nil:
-				return false
-			default:
-				return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
-			}
-		})
-		shuffleWithinSortGroups(available)
+		s.sortOpenAILegacyLoadCandidates(available, time.Now())
 
 		selectionOrder := make([]accountWithLoad, 0, len(available))
 		if requireCompact {
@@ -2123,6 +2246,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 				continue
 			}
+			s.reportOpenAIAccountScheduleAttempt(fresh.ID)
 			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
@@ -2157,6 +2281,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 				continue
 			}
+			s.reportOpenAIAccountScheduleAttempt(fresh.ID)
 			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
@@ -2202,6 +2327,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			continue
 		}
+		s.reportOpenAIAccountScheduleAttempt(fresh.ID)
 		return s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
 			AccountID:      fresh.ID,
 			MaxConcurrency: fresh.Concurrency,

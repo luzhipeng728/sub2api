@@ -137,6 +137,7 @@ type openAIAccountRuntimeStats struct {
 type openAIAccountRuntimeStat struct {
 	errorRateEWMABits atomic.Uint64
 	ttftEWMABits      atomic.Uint64
+	lastAttemptUnixNs atomic.Int64
 }
 
 func newOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
@@ -209,6 +210,17 @@ func (s *openAIAccountRuntimeStats) report(accountID int64, success bool, firstT
 	}
 }
 
+func (s *openAIAccountRuntimeStats) reportAttempt(accountID int64, now time.Time) {
+	if s == nil || accountID <= 0 {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	stat := s.loadOrCreate(accountID)
+	stat.lastAttemptUnixNs.Store(now.UnixNano())
+}
+
 func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64, ttft float64, hasTTFT bool) {
 	if s == nil || accountID <= 0 {
 		return 0, 0, false
@@ -227,6 +239,25 @@ func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64
 		return errorRate, 0, false
 	}
 	return errorRate, ttftValue, true
+}
+
+func (s *openAIAccountRuntimeStats) lastAttempt(accountID int64) (time.Time, bool) {
+	if s == nil || accountID <= 0 {
+		return time.Time{}, false
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return time.Time{}, false
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return time.Time{}, false
+	}
+	unixNs := stat.lastAttemptUnixNs.Load()
+	if unixNs <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, unixNs), true
 }
 
 func (s *openAIAccountRuntimeStats) size() int {
@@ -1319,11 +1350,8 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 		return nil
 	}
 	s.openaiSchedulerOnce.Do(func() {
-		if s.openaiAccountStats == nil {
-			s.openaiAccountStats = newOpenAIAccountRuntimeStats()
-		}
 		if s.openaiScheduler == nil {
-			s.openaiScheduler = newDefaultOpenAIAccountScheduler(s, s.openaiAccountStats)
+			s.openaiScheduler = newDefaultOpenAIAccountScheduler(s, s.getOpenAIAccountRuntimeStats())
 		}
 	})
 	return s.openaiScheduler
@@ -1508,10 +1536,14 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(accountID int64, success bool, firstTokenMs *int) {
 	scheduler := s.getOpenAIAccountScheduler(context.Background())
-	if scheduler == nil {
+	if scheduler != nil {
+		scheduler.ReportResult(accountID, success, firstTokenMs)
 		return
 	}
-	scheduler.ReportResult(accountID, success, firstTokenMs)
+	stats := s.getOpenAIAccountRuntimeStats()
+	if stats != nil {
+		stats.report(accountID, success, firstTokenMs)
+	}
 }
 
 func (s *OpenAIGatewayService) RecordOpenAIAccountSwitch() {
