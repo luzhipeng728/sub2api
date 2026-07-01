@@ -67,7 +67,7 @@ func TestOpenAIOAuthResolvesCodexRustlsTLS13Profile(t *testing.T) {
 	if !reflect.DeepEqual(profile.SupportedVersions, []uint16{0x0304}) {
 		t.Fatalf("supported versions = %#v, want TLS 1.3 only", profile.SupportedVersions)
 	}
-	if !reflect.DeepEqual(profile.Curves, []uint16{29, 23, 24, 0x11ec}) {
+	if !reflect.DeepEqual(profile.Curves, []uint16{29, 23, 24}) {
 		t.Fatalf("curves = %#v, want Codex rustls aws-lc-rs groups", profile.Curves)
 	}
 	if !reflect.DeepEqual(profile.KeyShareGroups, []uint16{29}) {

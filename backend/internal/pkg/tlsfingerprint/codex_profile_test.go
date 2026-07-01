@@ -22,7 +22,7 @@ func TestCodexCLIRustlsProfileUsesSourceDerivedTLS13Defaults(t *testing.T) {
 		t.Fatalf("cipher suites = %#v, want %#v", profile.CipherSuites, wantCiphers)
 	}
 
-	wantCurves := []uint16{29, 23, 24, 0x11ec}
+	wantCurves := []uint16{29, 23, 24}
 	if !reflect.DeepEqual(profile.Curves, wantCurves) {
 		t.Fatalf("curves = %#v, want %#v", profile.Curves, wantCurves)
 	}

@@ -72,7 +72,8 @@ const (
 // built with default features disabled and only aws_lc_rs/std enabled, so the
 // websocket ClientHello is TLS 1.3 only. rustls randomizes order-insensitive
 // extensions per handshake; this profile mirrors that by reshuffling the same
-// extension set on each call.
+// extension set on each call. uTLS cannot currently emit rustls' optional
+// X25519MLKEM768 group, so the supported-groups list keeps the classic groups.
 func CodexCLIRustlsProfile() *Profile {
 	return codexCLIRustlsProfileForSeed(randomUint16())
 }
@@ -105,7 +106,6 @@ func codexCLIRustlsProfileForSeed(seed uint16) *Profile {
 			uint16(utls.X25519),
 			uint16(utls.CurveP256),
 			uint16(utls.CurveP384),
-			0x11ec, // X25519MLKEM768 is available but not preferred without prefer-post-quantum.
 		},
 		PointFormats: []uint16{
 			0,
