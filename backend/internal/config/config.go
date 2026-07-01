@@ -1095,13 +1095,13 @@ type GatewaySchedulingConfig struct {
 	// CodexHeadroomAware: 选号时按 codex 5h/周 余量分桶——余量多的账号优先派单,
 	// 已达软阈值(榨干)的账号沉到最后一桶,但仍在选号序列里、能接到溢出流量(不跳过)。
 	// 默认 true。Codex5hSoftLimit/Codex7dSoftLimit 为"视为榨干"的百分比阈值。
-	CodexHeadroomAware bool `mapstructure:"codex_headroom_aware"`
+	CodexHeadroomAware bool    `mapstructure:"codex_headroom_aware"`
 	// CodexFailoverProvenAlive: 分层 failover——首选沿用 headroom-aware;失败重试(selectionOrder 下标1+)
 	// 改用"proven-alive"排序(最近有成功出活 hasTTFT + 错误率低优先,忽略 5h/周余量),从而跳出
 	// "有余量但已死/周限"的号(如 5h=0% 但周限死的账号)。默认开启。
 	CodexFailoverProvenAlive bool    `mapstructure:"codex_failover_proven_alive"`
 	Codex5hSoftLimit         float64 `mapstructure:"codex_5h_soft_limit"`
-	Codex7dSoftLimit         float64 `mapstructure:"codex_7d_soft_limit"`
+	Codex7dSoftLimit   float64 `mapstructure:"codex_7d_soft_limit"`
 
 	// 负载计算
 	LoadBatchEnabled    bool `mapstructure:"load_batch_enabled"`
@@ -1864,7 +1864,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
 	viper.SetDefault("gateway.failover_on_400", false)
-	viper.SetDefault("gateway.max_account_switches", 20)
+	viper.SetDefault("gateway.max_account_switches", 10)
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
@@ -1960,7 +1960,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.max_line_size", 500*1024*1024)
 	// 账号并发满时允许少量排队，避免 topK 候选短时打满后直接快速失败。
-	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 2)
+	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 3)
 	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 120*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)

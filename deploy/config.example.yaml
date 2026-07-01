@@ -429,7 +429,7 @@ gateway:
   scheduling:
     # Sticky session max waiting queue size
     # 粘性会话最大排队长度
-    sticky_session_max_waiting: 2
+    sticky_session_max_waiting: 3
     # Sticky session wait timeout (duration)
     # 粘性会话等待超时（时间段）
     sticky_session_wait_timeout: 120s
