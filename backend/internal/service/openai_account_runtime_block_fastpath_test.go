@@ -35,6 +35,22 @@ func TestOpenAIRuntimeBlock_AppliesToOpenAIAPIKeyWhenRateLimitServiceStopsSchedu
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
+func TestOpenAIRuntimeBlock_PrewarmStillBlocksWSDialHardFailures(t *testing.T) {
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				OpenAIWS: config.GatewayOpenAIWSConfig{PrewarmSessionEnabled: true},
+			},
+		},
+	}
+	svc.SetOpenAIPrewarmSessionCache(newFakePrewarmSessionCache())
+	account := &Account{ID: 48, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "ws_dial_403")
+
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
 func TestOpenAIRuntimeBlock_DoesNotApplyToOtherPlatforms(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	account := &Account{ID: 45, Platform: PlatformGemini, Type: AccountTypeOAuth}
