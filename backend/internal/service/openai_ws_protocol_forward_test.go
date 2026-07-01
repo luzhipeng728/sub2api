@@ -187,59 +187,75 @@ func TestOpenAIGatewayService_Forward_HTTPIngressStaysHTTPWhenWSEnabled(t *testi
 }
 
 // TestOpenAIGatewayService_Forward_HTTPIngressWSV2Bypass 验证 bypass 开关：
-// HTTP 入站 + bypass 开 + 账号 Resolve 为 WSv2 → 撤销降级，decision 为 responses_websockets_v2。
-// Forward 后续会尝试走 WSv2（无连接池会失败返回 error），但 transport decision 已写入 context，
-// 测试只断言决策结果，不依赖真实 WS 拨号。
+// prewarm 开启时，HTTP 普通请求只有在 OAuth 账号 5h 接近上限后才升 WSv2。
 func TestOpenAIGatewayService_Forward_HTTPIngressWSV2Bypass(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
-	c.Request.Header.Set("User-Agent", "custom-client/1.0")
-	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 
-	upstream := &httpUpstreamRecorder{
-		resp: &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":2}}`)),
-		},
-	}
+	newCase := func(used5h float64) (*gin.Context, *httpUpstreamRecorder, *OpenAIGatewayService, *Account) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+		c.Request.Header.Set("User-Agent", "custom-client/1.0")
+		SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 
-	cfg := &config.Config{}
-	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
-	cfg.Gateway.OpenAIWS.Enabled = true
-	cfg.Gateway.OpenAIWS.OAuthEnabled = true
-	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
-	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
-	// 关键：开启 bypass
-	cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled = true
+		upstream := &httpUpstreamRecorder{
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":2}}`)),
+			},
+		}
 
-	svc := &OpenAIGatewayService{
-		cfg:              cfg,
-		httpUpstream:     upstream,
-		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
-	}
+		cfg := &config.Config{}
+		cfg.Security.URLAllowlist.Enabled = false
+		cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+		cfg.Gateway.OpenAIWS.Enabled = true
+		cfg.Gateway.OpenAIWS.OAuthEnabled = true
+		cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+		cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+		cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled = true
+		cfg.Gateway.OpenAIWS.PrewarmSessionEnabled = true
+		cfg.Gateway.Scheduling.Codex5hSoftLimit = 95
 
-	account := &Account{
-		ID:          201,
-		Name:        "openai-wsv2-bypass",
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeAPIKey,
-		Concurrency: 1,
-		Credentials: map[string]any{"api_key": "sk-test"},
-		Extra:       map[string]any{"responses_websockets_v2_enabled": true},
+		svc := &OpenAIGatewayService{
+			cfg:              cfg,
+			httpUpstream:     upstream,
+			openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		}
+
+		account := &Account{
+			ID:          201,
+			Name:        "openai-wsv2-bypass",
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeOAuth,
+			Concurrency: 1,
+			Credentials: map[string]any{"access_token": "oauth-token"},
+			Extra: map[string]any{
+				"responses_websockets_v2_enabled": true,
+				"codex_5h_used_percent":           used5h,
+				"codex_5h_reset_at":               time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			},
+		}
+		return c, upstream, svc, account
 	}
 
 	body := []byte(`{"model":"gpt-5.1","stream":false,"input":[{"type":"input_text","text":"hi"}]}`)
-	// Forward 会因无 WS 连接池而失败返回 error，但 transport decision 已写入 context。
-	_, _ = svc.Forward(context.Background(), c, account, body)
 
+	c, upstream, svc, account := newCase(42)
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, upstream.lastReq, "5h 未接近上限时应走 HTTP 原生")
 	decision, _ := c.Get("openai_ws_transport_decision")
 	reason, _ := c.Get("openai_ws_transport_reason")
-	require.Equal(t, string(OpenAIUpstreamTransportResponsesWebsocketV2), decision,
-		"bypass 开启 + WSv2 账号 + HTTP 入站 → 应走 WSv2 上游")
+	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
+	require.Equal(t, "client_protocol_http", reason)
+
+	c, _, svc, account = newCase(96)
+	_, _ = svc.Forward(context.Background(), c, account, body)
+	decision, _ = c.Get("openai_ws_transport_decision")
+	reason, _ = c.Get("openai_ws_transport_reason")
+	require.Equal(t, string(OpenAIUpstreamTransportResponsesWebsocketV2), decision)
 	require.Equal(t, "http_ingress_ws_v2_bypass", reason)
 }
 

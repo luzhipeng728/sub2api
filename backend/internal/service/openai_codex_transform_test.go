@@ -117,6 +117,47 @@ func TestApplyCodexOAuthTransform_ToolContinuationPreservesNativeMessageAndReaso
 	require.Equal(t, "rs_123", second["id"])
 }
 
+func TestApplyCodexOAuthTransform_DropsResponsesItemIDsForCodexWS(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-5.5",
+		"tools": []any{
+			map[string]any{"type": "function", "name": "shell"},
+		},
+		"input": []any{
+			map[string]any{"type": "message", "id": "item_c5f998594cee0e9f0e65993a", "role": "user", "content": "hi"},
+			map[string]any{"type": "function_call", "id": "item_837de77dd86c48cff5868bec", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+			map[string]any{"type": "function_call_output", "id": "item_output", "call_id": "call_1", "content": []any{
+				map[string]any{"type": "output_text", "text": "ok"},
+			}},
+		},
+	}
+
+	applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
+		SkipDefaultInstructions: true,
+	})
+
+	input, ok := reqBody["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 3)
+
+	message, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, message, "id")
+	require.Equal(t, "hi", message["content"])
+
+	call, ok := input[1].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, call, "id")
+	require.Equal(t, "fc_1", call["call_id"])
+
+	output, ok := input[2].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, output, "id")
+	require.NotContains(t, output, "content")
+	require.Equal(t, "fc_1", output["call_id"])
+	require.Equal(t, "ok", output["output"])
+}
+
 func TestApplyCodexOAuthTransform_ToolContinuationNormalizesToolReferenceIDsOnly(t *testing.T) {
 	reqBody := map[string]any{
 		"model": "gpt-5.2",
