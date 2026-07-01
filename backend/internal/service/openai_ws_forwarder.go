@@ -1917,6 +1917,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		Account:         account,
 		WSURL:           wsURL,
 		Headers:         wsHeaders,
+		TLSProfile:      s.resolveWSTLSProfile(account),
 		PreferredConnID: preferredConnID,
 		ForceNewConn:    forceNewConn,
 		ProxyURL: func() string {
@@ -3026,9 +3027,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	wsHeaders, _ := s.buildOpenAIWSHeaders(c, account, token, wsDecision, isCodexCLI, turnState, strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)), firstPayload.promptCacheKey)
 	baseAcquireReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
+		Account:    account,
+		WSURL:      wsURL,
+		Headers:    wsHeaders,
+		TLSProfile: s.resolveWSTLSProfile(account),
 		ProxyURL: func() string {
 			if account.ProxyID != nil && account.Proxy != nil {
 				return account.Proxy.URL()
