@@ -58,8 +58,8 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 0 {
-		t.Fatalf("StickySessionMaxWaiting = %d, want 0", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
+	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 3 {
+		t.Fatalf("StickySessionMaxWaiting = %d, want 3", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
 	}
 	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 120*time.Second {
 		t.Fatalf("StickySessionWaitTimeout = %v, want 120s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
@@ -67,8 +67,14 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	if cfg.Gateway.Scheduling.FallbackWaitTimeout != 30*time.Second {
 		t.Fatalf("FallbackWaitTimeout = %v, want 30s", cfg.Gateway.Scheduling.FallbackWaitTimeout)
 	}
-	if cfg.Gateway.Scheduling.FallbackMaxWaiting != 0 {
-		t.Fatalf("FallbackMaxWaiting = %d, want 0", cfg.Gateway.Scheduling.FallbackMaxWaiting)
+	if cfg.Gateway.Scheduling.FallbackMaxWaiting != 100 {
+		t.Fatalf("FallbackMaxWaiting = %d, want 100", cfg.Gateway.Scheduling.FallbackMaxWaiting)
+	}
+	if !cfg.Gateway.Scheduling.CodexHeadroomAware {
+		t.Fatalf("CodexHeadroomAware = false, want true")
+	}
+	if cfg.Gateway.Scheduling.CodexFailoverProvenAlive {
+		t.Fatalf("CodexFailoverProvenAlive = true, want false")
 	}
 	if !cfg.Gateway.Scheduling.LoadBatchEnabled {
 		t.Fatalf("LoadBatchEnabled = false, want true")
@@ -133,6 +139,9 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	}
 	if cfg.Gateway.OpenAIWS.FallbackCooldownSeconds != 30 {
 		t.Fatalf("Gateway.OpenAIWS.FallbackCooldownSeconds = %d, want 30", cfg.Gateway.OpenAIWS.FallbackCooldownSeconds)
+	}
+	if cfg.Gateway.OpenAIWS.LBTopK != 32 {
+		t.Fatalf("Gateway.OpenAIWS.LBTopK = %d, want 32", cfg.Gateway.OpenAIWS.LBTopK)
 	}
 	if cfg.Gateway.OpenAIWS.EventFlushBatchSize != 1 {
 		t.Fatalf("Gateway.OpenAIWS.EventFlushBatchSize = %d, want 1", cfg.Gateway.OpenAIWS.EventFlushBatchSize)

@@ -318,7 +318,7 @@ gateway:
     # payload_schema 日志采样率（0-1）；降低热路径日志放大
     payload_log_sample_rate: 0.2
     # 调度与粘连参数
-    lb_top_k: 7
+    lb_top_k: 32
     sticky_session_ttl_seconds: 3600
     # 会话哈希迁移兼容开关：新 key 未命中时回退读取旧 SHA-256 key
     session_hash_read_old_fallback: true
@@ -443,6 +443,18 @@ gateway:
     # 负载感知选择时优先用尽「会话窗口最早重置」的账号；false 保持
     # 原有「优先级 → 负载率 → LRU」行为（默认）。
     prefer_soonest_reset: false
+    # Codex 5h/weekly headroom-aware ordering. Keeps accounts with quota headroom first,
+    # while still allowing maxed accounts to receive overflow traffic.
+    # Codex 5h/周余量感知排序：优先用有余量账号，满额账号仍可接溢出。
+    codex_headroom_aware: true
+    # Keep failover tail in the original load/headroom order. Turning this on can
+    # over-concentrate traffic on accounts that recently produced TTFT samples.
+    # 失败换号尾段不再默认按 proven-alive 重排，避免流量集中到少数热号。
+    codex_failover_proven_alive: false
+    # Soft thresholds for treating Codex quota as maxed.
+    # 判断 Codex 额度接近打满的软阈值。
+    codex_5h_soft_limit: 95.0
+    codex_7d_soft_limit: 99.0
     # Enable batch load calculation for scheduling
     # 启用调度批量负载计算
     load_batch_enabled: true
