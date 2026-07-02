@@ -1034,8 +1034,8 @@ type GatewayUsageRecordConfig struct {
 	AutoScaleCooldownSeconds int `mapstructure:"auto_scale_cooldown_seconds"`
 }
 
-// TLSFingerprintConfig TLS指纹伪装配置
-// 用于模拟 Claude CLI (Node.js) 的 TLS 握手特征，避免被识别为非官方客户端
+// TLSFingerprintConfig TLS 指纹配置
+// 用于配置账号级 ClientHello profile；未绑定 profile 时由账号平台选择内置默认值。
 type TLSFingerprintConfig struct {
 	// Enabled: 是否全局启用TLS指纹功能
 	Enabled bool `mapstructure:"enabled"`
@@ -1044,8 +1044,8 @@ type TLSFingerprintConfig struct {
 	Profiles map[string]TLSProfileConfig `mapstructure:"profiles"`
 }
 
-// TLSProfileConfig 单个TLS指纹模板的配置
-// 所有列表字段为空时使用内置默认值（Claude CLI 2.x / Node.js 20.x）
+// TLSProfileConfig 单个 TLS 指纹模板的配置
+// 所有列表字段为空时使用历史内置默认值；OpenAI OAuth 未绑定模板时使用 Codex CLI 内置 profile。
 // 建议通过 TLS 指纹采集工具 (tests/tls-fingerprint-web) 获取完整配置
 type TLSProfileConfig struct {
 	// Name: 模板显示名称
@@ -1095,13 +1095,13 @@ type GatewaySchedulingConfig struct {
 	// CodexHeadroomAware: 选号时按 codex 5h/周 余量分桶——余量多的账号优先派单,
 	// 已达软阈值(榨干)的账号沉到最后一桶,但仍在选号序列里、能接到溢出流量(不跳过)。
 	// 默认 true。Codex5hSoftLimit/Codex7dSoftLimit 为"视为榨干"的百分比阈值。
-	CodexHeadroomAware bool    `mapstructure:"codex_headroom_aware"`
+	CodexHeadroomAware bool `mapstructure:"codex_headroom_aware"`
 	// CodexFailoverProvenAlive: 分层 failover——首选沿用 headroom-aware;失败重试(selectionOrder 下标1+)
 	// 改用"proven-alive"排序(最近有成功出活 hasTTFT + 错误率低优先,忽略 5h/周余量),从而跳出
 	// "有余量但已死/周限"的号(如 5h=0% 但周限死的账号)。默认开启。
 	CodexFailoverProvenAlive bool    `mapstructure:"codex_failover_proven_alive"`
 	Codex5hSoftLimit         float64 `mapstructure:"codex_5h_soft_limit"`
-	Codex7dSoftLimit   float64 `mapstructure:"codex_7d_soft_limit"`
+	Codex7dSoftLimit         float64 `mapstructure:"codex_7d_soft_limit"`
 
 	// 负载计算
 	LoadBatchEnabled    bool `mapstructure:"load_batch_enabled"`

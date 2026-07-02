@@ -107,11 +107,12 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 	// prewarm session 启用时，跳过「限额/限流/上游错误」类的 runtime block：
 	// prewarm 的设计就是让限额账号（会返回 429/rate_limit）通过续接绕过限额。
 	// 这些 block 会导致限额账号被内存排除 → 多个账号轮流 block → no available accounts → 503。
-	// 只保留 token 类硬错误的 block（token 坏了 prewarm 也没用）。
+	// 只保留 token/WS auth 类硬错误的 block（token 坏或握手被 401/403 拒绝时，
+	// prewarm 也无法复用该账号；继续尝试只会制造 failover 风暴）。
 	if s.isOpenAIPrewarmSessionEnabled() {
 		switch reason {
-		case "missing_refresh_token", "token_refresh_failed", "auth_failed":
-			// token 类硬错误，保留 block
+		case "missing_refresh_token", "token_refresh_failed", "auth_failed", "ws_dial_401", "ws_dial_403":
+			// token/WS auth 类硬错误，保留 block
 		default:
 			// 限额/限流/上游错误/传输错误等，prewarm 启用时跳过
 			return
