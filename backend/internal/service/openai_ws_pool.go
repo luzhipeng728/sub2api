@@ -561,6 +561,11 @@ type openAIWSConnPool struct {
 	// 限制单IP同时进行的WS握手数,避免突发触发 Cloudflare 403 风暴。
 	handshakeSems sync.Map
 
+	// proxyBreakers: 每出口代理IP的握手熔断器(key: proxyURL, value: *proxyHandshakeBreaker)。
+	// CF 403 封 IP 后,重试雪崩会把 CF 越打越死;熔断后该代理的新握手直接 fail-fast(不再打 CF),
+	// 给 IP 冷却机会,并打断"403→重试→更多403"的雪崩。
+	proxyBreakers sync.Map
+
 	metrics openAIWSPoolMetrics
 
 	workerStopCh chan struct{}
@@ -1522,9 +1527,86 @@ func (p *openAIWSConnPool) acquireHandshakeSlot(ctx context.Context, proxyURL st
 	}
 }
 
+// 握手熔断参数:窗口内 403 达阈值 → 该代理进入冷却期,期间新握手直接 fail-fast。
+const (
+	openAIWSProxy403Window    = 10 * time.Second
+	openAIWSProxy403Threshold = 5
+	openAIWSProxy403Cooldown  = 45 * time.Second
+)
+
+type proxyHandshakeBreaker struct {
+	mu          sync.Mutex
+	failCount   int
+	windowStart time.Time
+	openUntil   time.Time
+}
+
+// proxyBreakerOpen 判断该代理是否处于握手熔断冷却期(冷却期内不该再打 CF)。
+func (p *openAIWSConnPool) proxyBreakerOpen(proxyURL string) bool {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return false
+	}
+	v, ok := p.proxyBreakers.Load(proxyURL)
+	if !ok {
+		return false
+	}
+	b := v.(*proxyHandshakeBreaker)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return time.Now().Before(b.openUntil)
+}
+
+// recordProxyHandshake403 累计该代理握手 403;窗口内超阈值则开启熔断冷却,打断重试雪崩。
+func (p *openAIWSConnPool) recordProxyHandshake403(proxyURL string) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return
+	}
+	v, _ := p.proxyBreakers.LoadOrStore(proxyURL, &proxyHandshakeBreaker{})
+	b := v.(*proxyHandshakeBreaker)
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Before(b.openUntil) {
+		return
+	}
+	if b.windowStart.IsZero() || now.Sub(b.windowStart) > openAIWSProxy403Window {
+		b.windowStart = now
+		b.failCount = 0
+	}
+	b.failCount++
+	if b.failCount >= openAIWSProxy403Threshold {
+		b.openUntil = now.Add(openAIWSProxy403Cooldown)
+		b.failCount = 0
+		b.windowStart = time.Time{}
+		logOpenAIWSModeInfo("proxy_handshake_breaker_open cooldown_s=%d", int(openAIWSProxy403Cooldown.Seconds()))
+	}
+}
+
+// resetProxyHandshakeBreaker 握手成功 → 清零该代理的失败计数与熔断。
+func (p *openAIWSConnPool) resetProxyHandshakeBreaker(proxyURL string) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return
+	}
+	if v, ok := p.proxyBreakers.Load(proxyURL); ok {
+		b := v.(*proxyHandshakeBreaker)
+		b.mu.Lock()
+		b.failCount = 0
+		b.windowStart = time.Time{}
+		b.openUntil = time.Time{}
+		b.mu.Unlock()
+	}
+}
+
 func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConn, error) {
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
+	}
+	// 熔断:该代理正处于 CF 403 冷却期 → 直接 fail-fast,不再打 CF(打断"403→重试→更多403"雪崩)。
+	if p.proxyBreakerOpen(req.ProxyURL) {
+		return nil, &openAIWSDialError{StatusCode: http.StatusForbidden, Err: errors.New("proxy handshake circuit open (cloudflare 403 cooldown)")}
 	}
 	// 每出口IP握手并发限制:避免突发狂建握手触发 Cloudflare 403。
 	release, err := p.acquireHandshakeSlot(ctx, req.ProxyURL)
@@ -1534,6 +1616,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	defer release()
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, req.Headers, req.ProxyURL)
 	if err != nil {
+		if status == http.StatusForbidden {
+			p.recordProxyHandshake403(req.ProxyURL)
+		}
 		return nil, &openAIWSDialError{
 			StatusCode:      status,
 			ResponseHeaders: cloneHeader(handshakeHeaders),
@@ -1547,6 +1632,8 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			Err:             errors.New("openai ws dialer returned nil connection"),
 		}
 	}
+	// 握手成功 → 清零该代理熔断计数(CF 已放行)。
+	p.resetProxyHandshakeBreaker(req.ProxyURL)
 	id := p.nextConnID(req.Account.ID)
 	return newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders), nil
 }
