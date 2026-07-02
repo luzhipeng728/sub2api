@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
@@ -19,7 +20,12 @@ import (
 // Profile contains TLS fingerprint configuration.
 // All slice fields use built-in defaults when empty.
 type Profile struct {
-	Name                string // Profile name for identification
+	Name string // Profile name for identification
+	// ClientHelloID 非空时,直接用 utls 内置的真实指纹预设(如 "chrome_131")构建 ClientHello,
+	// 并强制 ALPN 为 http/1.1(WebSocket 走 HTTP/1.1 Upgrade)。忽略下方各手搓字段。
+	// 用于 codex WS:手搓 rustls spec 易出错(ClientHello 非法→TLS 握手直接失败),
+	// 直接用 utls 久经考验的 Chrome 预设过 Cloudflare 更稳(本地实测 Chrome_131 → 101)。
+	ClientHelloID       string
 	CipherSuites        []uint16
 	Curves              []uint16
 	PointFormats        []uint16
@@ -275,7 +281,17 @@ func performTLSHandshake(ctx context.Context, conn net.Conn, profile *Profile, a
 		host = addr
 	}
 
-	spec := buildClientHelloSpecFromProfile(profile)
+	var spec *utls.ClientHelloSpec
+	if profile != nil && strings.TrimSpace(profile.ClientHelloID) != "" {
+		s, perr := presetSpecForClientHelloID(profile.ClientHelloID)
+		if perr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("preset spec %q: %w", profile.ClientHelloID, perr)
+		}
+		spec = s
+	} else {
+		spec = buildClientHelloSpecFromProfile(profile)
+	}
 	tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloCustom)
 
 	if err := tlsConn.ApplyPreset(spec); err != nil {
@@ -296,6 +312,44 @@ func performTLSHandshake(ctx context.Context, conn net.Conn, profile *Profile, a
 		"alpn", state.NegotiatedProtocol)
 
 	return tlsConn, nil
+}
+
+// BuiltInCodexWSProfileName 是 codex WS 握手用的内置 profile 名。
+const BuiltInCodexWSProfileName = "Built-in Codex WS (uTLS Chrome-131)"
+
+// CodexCLIWSProfile 返回 codex responses WebSocket 握手用的 TLS 指纹 profile。
+// 用 utls 内置真实 Chrome 预设 + 强制 ALPN=http/1.1(WS 是 HTTP/1.1 Upgrade)。
+// 本地实测(gowstest):代理 CONNECT 隧道 + 该指纹 → 过 Cloudflare 拿 101 Switching。
+func CodexCLIWSProfile() *Profile {
+	return &Profile{Name: BuiltInCodexWSProfileName, ClientHelloID: "chrome_131"}
+}
+
+// presetSpecForClientHelloID 用 utls 内置真实指纹预设构建 ClientHelloSpec,
+// 并强制 ALPN 只留 http/1.1(否则预设自带的 h2 会被协商上,WS 升级失败)。
+func presetSpecForClientHelloID(id string) (*utls.ClientHelloSpec, error) {
+	var hello utls.ClientHelloID
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "chrome_131", "chrome131", "chrome":
+		hello = utls.HelloChrome_131
+	case "chrome_133", "chrome133":
+		hello = utls.HelloChrome_133
+	case "chrome_120":
+		hello = utls.HelloChrome_120
+	case "firefox_120", "firefox":
+		hello = utls.HelloFirefox_120
+	default:
+		hello = utls.HelloChrome_131
+	}
+	spec, err := utls.UTLSIdToSpec(hello)
+	if err != nil {
+		return nil, err
+	}
+	for _, ext := range spec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			a.AlpnProtocols = []string{"http/1.1"}
+		}
+	}
+	return &spec, nil
 }
 
 // toUTLSCurves converts uint16 slice to utls.CurveID slice.
