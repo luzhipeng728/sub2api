@@ -26,7 +26,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/cespare/xxhash/v2"
@@ -357,8 +356,6 @@ type OpenAIGatewayService struct {
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
-	// tlsFPProfileService 解析账号的 TLS 指纹 profile;WS 握手复用它伪装指纹以绕过 CF。可为 nil(测试)。
-	tlsFPProfileService *TLSFingerprintProfileService
 
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
@@ -385,15 +382,6 @@ type OpenAIGatewayService struct {
 	openaiCompatAnthropicDigestSessions sync.Map
 }
 
-// resolveWSTLSProfile 解析账号的 TLS 指纹 profile,供 WS 握手伪装使用。
-// 服务未注入(测试场景)或账号未开启 TLS 指纹时返回 nil → WS 走原生 TLS,行为不变。
-func (s *OpenAIGatewayService) resolveWSTLSProfile(account *Account) *tlsfingerprint.Profile {
-	if s == nil || s.tlsFPProfileService == nil {
-		return nil
-	}
-	return s.tlsFPProfileService.ResolveTLSProfile(account)
-}
-
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
 func NewOpenAIGatewayService(
 	accountRepo AccountRepository,
@@ -417,7 +405,6 @@ func NewOpenAIGatewayService(
 	balanceNotifyService *BalanceNotifyService,
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
-	tlsFPProfileService *TLSFingerprintProfileService,
 ) *OpenAIGatewayService {
 	svc := &OpenAIGatewayService{
 		accountRepo:         accountRepo,
@@ -450,7 +437,6 @@ func NewOpenAIGatewayService(
 		balanceNotifyService:  balanceNotifyService,
 		settingService:        settingService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
-		tlsFPProfileService:   tlsFPProfileService,
 		responseHeaderFilter:  compileResponseHeaderFilter(cfg),
 		codexSnapshotThrottle: newAccountWriteThrottle(openAICodexSnapshotPersistMinInterval),
 	}

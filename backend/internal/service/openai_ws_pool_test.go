@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1422,7 +1421,6 @@ func (d *openAIWSFakeDialer) Dial(
 	wsURL string,
 	headers http.Header,
 	proxyURL string,
-	_ *tlsfingerprint.Profile,
 ) (openAIWSClientConn, int, http.Header, error) {
 	_ = ctx
 	_ = wsURL
@@ -1486,7 +1484,6 @@ func (d *openAIWSCountingDialer) Dial(
 	wsURL string,
 	headers http.Header,
 	proxyURL string,
-	_ *tlsfingerprint.Profile,
 ) (openAIWSClientConn, int, http.Header, error) {
 	_ = ctx
 	_ = wsURL
@@ -1509,7 +1506,6 @@ func (d *openAIWSAlwaysFailDialer) Dial(
 	wsURL string,
 	headers http.Header,
 	proxyURL string,
-	_ *tlsfingerprint.Profile,
 ) (openAIWSClientConn, int, http.Header, error) {
 	_ = ctx
 	_ = wsURL
@@ -1667,7 +1663,6 @@ func (d *openAIWSNilConnDialer) Dial(
 	wsURL string,
 	headers http.Header,
 	proxyURL string,
-	_ *tlsfingerprint.Profile,
 ) (openAIWSClientConn, int, http.Header, error) {
 	_ = ctx
 	_ = wsURL
@@ -1700,11 +1695,11 @@ func TestOpenAIWSConnPool_SnapshotTransportMetrics(t *testing.T) {
 	dialer, ok := pool.clientDialer.(*coderOpenAIWSClientDialer)
 	require.True(t, ok)
 
-	_, err := dialer.handshakeHTTPClient("http://127.0.0.1:28080", nil)
+	_, err := dialer.proxyHTTPClient("http://127.0.0.1:28080")
 	require.NoError(t, err)
-	_, err = dialer.handshakeHTTPClient("http://127.0.0.1:28080", nil)
+	_, err = dialer.proxyHTTPClient("http://127.0.0.1:28080")
 	require.NoError(t, err)
-	_, err = dialer.handshakeHTTPClient("http://127.0.0.1:28081", nil)
+	_, err = dialer.proxyHTTPClient("http://127.0.0.1:28081")
 	require.NoError(t, err)
 
 	snapshot := pool.SnapshotTransportMetrics()
