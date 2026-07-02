@@ -1,20 +1,16 @@
 // Package tlsfingerprint provides TLS fingerprint simulation for HTTP clients.
-// It uses the utls library to create TLS connections with configurable
-// ClientHello profiles.
+// It uses the utls library to create TLS connections that mimic Node.js/Claude Code clients.
 package tlsfingerprint
 
 import (
 	"bufio"
 	"context"
-	cryptorand "crypto/rand"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
@@ -56,104 +52,7 @@ type SOCKS5ProxyDialer struct {
 	proxyURL *url.URL
 }
 
-const (
-	// BuiltInCodexCLIProfileName is the default profile name used for OpenAI
-	// OAuth accounts when no explicit TLS fingerprint profile is bound.
-	BuiltInCodexCLIProfileName = "Built-in Default (Codex CLI / codex-rs rustls)"
-	// BuiltInLegacyNodeCompatibleProfileName names the historical fallback used
-	// by empty profiles. It is kept for existing non-OpenAI TLS fingerprint users.
-	BuiltInLegacyNodeCompatibleProfileName = "Built-in Default (legacy Node-compatible)"
-)
-
-// CodexCLIRustlsProfile returns a Codex CLI WebSocket ClientHello profile.
-//
-// OpenAI Codex's responses websocket path uses tokio-tungstenite with rustls
-// 0.23 and the aws-lc-rs provider. In the current Codex workspace rustls is
-// built with default features disabled and only aws_lc_rs/std enabled, so the
-// websocket ClientHello is TLS 1.3 only. rustls randomizes order-insensitive
-// extensions per handshake; this profile mirrors that by reshuffling the same
-// extension set on each call.
-func CodexCLIRustlsProfile() *Profile {
-	return codexCLIRustlsProfileForSeed(randomUint16())
-}
-
-func codexCLIRustlsProfileForSeed(seed uint16) *Profile {
-	extensions := []uint16{
-		0,  // server_name
-		5,  // status_request
-		10, // supported_groups
-		11, // ec_point_formats
-		13, // signature_algorithms
-		23, // extended_master_secret
-		43, // supported_versions
-		45, // psk_key_exchange_modes
-		51, // key_share
-	}
-	sort.Slice(extensions, func(i, j int) bool {
-		return rustlsExtensionOrderHash(seed, extensions[i]) < rustlsExtensionOrderHash(seed, extensions[j])
-	})
-
-	return &Profile{
-		Name:         BuiltInCodexCLIProfileName,
-		EnableGREASE: false,
-		CipherSuites: []uint16{
-			0x1302, // TLS_AES_256_GCM_SHA384
-			0x1301, // TLS_AES_128_GCM_SHA256
-			0x1303, // TLS_CHACHA20_POLY1305_SHA256
-		},
-		Curves: []uint16{
-			uint16(utls.X25519),
-			uint16(utls.CurveP256),
-			uint16(utls.CurveP384),
-			0x11ec, // X25519MLKEM768 is available but not preferred without prefer-post-quantum.
-		},
-		PointFormats: []uint16{
-			0,
-		},
-		SignatureAlgorithms: []uint16{
-			0x0503, // ECDSA_NISTP384_SHA384
-			0x0403, // ECDSA_NISTP256_SHA256
-			0x0603, // ECDSA_NISTP521_SHA512
-			0x0807, // ED25519
-			0x0806, // RSA_PSS_SHA512
-			0x0805, // RSA_PSS_SHA384
-			0x0804, // RSA_PSS_SHA256
-			0x0601, // RSA_PKCS1_SHA512
-			0x0501, // RSA_PKCS1_SHA384
-			0x0401, // RSA_PKCS1_SHA256
-		},
-		SupportedVersions: []uint16{utls.VersionTLS13},
-		KeyShareGroups:    []uint16{uint16(utls.X25519)},
-		PSKModes:          []uint16{uint16(utls.PskModeDHE)},
-		Extensions:        extensions,
-	}
-}
-
-func randomUint16() uint16 {
-	var b [2]byte
-	if _, err := cryptorand.Read(b[:]); err == nil {
-		return binary.BigEndian.Uint16(b[:])
-	}
-	return 0
-}
-
-func rustlsExtensionOrderHash(seed uint16, extension uint16) uint32 {
-	x := (uint32(seed) << 16) | uint32(extension)
-	x = x + 0x7ed55d16 + (x << 12)
-	x = (x ^ 0xc761c23c) ^ (x >> 19)
-	x = x + 0x165667b1 + (x << 5)
-	x = (x + 0xd3a2646c) ^ (x << 9)
-	x = x + 0xfd7046c5 + (x << 3)
-	x = (x ^ 0xb55a4f09) ^ (x >> 16)
-	return x
-}
-
-// LegacyNodeCompatibleProfile returns the historical empty-profile fallback.
-func LegacyNodeCompatibleProfile() *Profile {
-	return &Profile{Name: BuiltInLegacyNodeCompatibleProfileName}
-}
-
-// Default TLS fingerprint values captured from a legacy Node-compatible client.
+// Default TLS fingerprint values captured from Claude Code (Node.js 24.x)
 // Captured via tls-fingerprint-web capture server
 // JA3 Hash: 44f88fca027f27bab4bb08d4af15f23e
 // JA4:      t13d1714h1_5b57614c22b0_7baf387fc6ff
@@ -408,7 +307,7 @@ func toUTLSCurves(curves []uint16) []utls.CurveID {
 	return result
 }
 
-// defaultExtensionOrder is the legacy Node-compatible extension order.
+// defaultExtensionOrder is the Node.js 24.x extension order.
 // Used when Profile.Extensions is empty.
 var defaultExtensionOrder = []uint16{
 	0,     // server_name

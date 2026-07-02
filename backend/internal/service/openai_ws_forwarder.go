@@ -1913,20 +1913,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	acquireCtx, acquireCancel := context.WithTimeout(ctx, s.openAIWSAcquireTimeout())
 	defer acquireCancel()
 
-	tlsProfile := s.resolveWSTLSProfile(account)
-	tlsProfileName := "-"
-	if tlsProfile != nil {
-		tlsProfileName = strings.TrimSpace(tlsProfile.Name)
-		if tlsProfileName == "" {
-			tlsProfileName = "default"
-		}
-	}
-
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
 		Account:         account,
 		WSURL:           wsURL,
 		Headers:         wsHeaders,
-		TLSProfile:      tlsProfile,
 		PreferredConnID: preferredConnID,
 		ForceNewConn:    forceNewConn,
 		ProxyURL: func() string {
@@ -1939,7 +1929,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if err != nil {
 		dialStatus, dialClass, dialCloseStatus, dialCloseReason, dialRespServer, dialRespVia, dialRespCFRay, dialRespReqID := summarizeOpenAIWSDialError(err)
 		logOpenAIWSModeInfo(
-			"acquire_fail account_id=%d account_type=%s transport=%s reason=%s dial_status=%d dial_class=%s dial_close_status=%s dial_close_reason=%s dial_resp_server=%s dial_resp_via=%s dial_resp_cf_ray=%s dial_resp_x_request_id=%s cause=%s preferred_conn_id=%s force_new_conn=%v ws_host=%s ws_path=%s proxy_enabled=%v tls_profile=%s",
+			"acquire_fail account_id=%d account_type=%s transport=%s reason=%s dial_status=%d dial_class=%s dial_close_status=%s dial_close_reason=%s dial_resp_server=%s dial_resp_via=%s dial_resp_cf_ray=%s dial_resp_x_request_id=%s cause=%s preferred_conn_id=%s force_new_conn=%v ws_host=%s ws_path=%s proxy_enabled=%v",
 			account.ID,
 			account.Type,
 			normalizeOpenAIWSLogValue(string(decision.Transport)),
@@ -1958,7 +1948,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			wsHost,
 			wsPath,
 			account.ProxyID != nil && account.Proxy != nil,
-			normalizeOpenAIWSLogValue(tlsProfileName),
 		)
 		var dialErr *openAIWSDialError
 		if errors.As(err, &dialErr) && dialErr != nil && dialErr.StatusCode > 0 {
@@ -3037,10 +3026,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	wsHeaders, _ := s.buildOpenAIWSHeaders(c, account, token, wsDecision, isCodexCLI, turnState, strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)), firstPayload.promptCacheKey)
 	baseAcquireReq := openAIWSAcquireRequest{
-		Account:    account,
-		WSURL:      wsURL,
-		Headers:    wsHeaders,
-		TLSProfile: s.resolveWSTLSProfile(account),
+		Account: account,
+		WSURL:   wsURL,
+		Headers: wsHeaders,
 		ProxyURL: func() string {
 			if account.ProxyID != nil && account.Proxy != nil {
 				return account.Proxy.URL()
