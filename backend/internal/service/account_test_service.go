@@ -813,6 +813,19 @@ func (s *AccountTestService) reconcileOpenAI429State(ctx context.Context, accoun
 	}
 
 	persistOpenAI429PlanType(ctx, s.accountRepo, account, body)
+	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		_ = s.accountRepo.ClearRateLimit(ctx, account.ID)
+		account.RateLimitedAt = nil
+		account.RateLimitResetAt = nil
+		if account.Status == StatusError {
+			if err := s.accountRepo.ClearError(ctx, account.ID); err != nil {
+				return
+			}
+			account.Status = StatusActive
+			account.ErrorMessage = ""
+		}
+		return
+	}
 
 	var resetAt *time.Time
 	if calculated := calculateOpenAI429ResetTime(headers); calculated != nil {

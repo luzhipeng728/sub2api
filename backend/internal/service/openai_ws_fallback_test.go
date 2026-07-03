@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	coderws "github.com/coder/websocket"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +120,36 @@ func TestClassifyOpenAIWSReconnectReason(t *testing.T) {
 	reason, retryable = classifyOpenAIWSReconnectReason(wrapOpenAIWSFallback("read_event", errors.New("io")))
 	require.Equal(t, "read_event", reason)
 	require.True(t, retryable)
+}
+
+func TestHandleOpenAIWSRetryableFallbackExhausted_FailsOverWithoutWriting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 913, Name: "ws-busy", Platform: PlatformOpenAI}
+	err := wrapOpenAIWSFallback("acquire_timeout", context.DeadlineExceeded)
+
+	retErr := svc.handleOpenAIWSRetryableFallbackExhausted(context.Background(), c, account, err)
+
+	var failoverErr *UpstreamFailoverError
+	require.True(t, errors.As(retErr, &failoverErr), "retryable WS fallback must ask handler to switch accounts")
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "acquire_timeout")
+	require.Equal(t, 0, rec.Body.Len(), "service must not write a response before handler failover")
+}
+
+func TestHandleOpenAIWSRetryableFallbackExhausted_NonRetryableStaysLocal(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	err := wrapOpenAIWSFallback("policy_violation", errors.New("policy"))
+
+	retErr := svc.handleOpenAIWSRetryableFallbackExhausted(context.Background(), nil, nil, err)
+
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(retErr, &failoverErr), "non-retryable WS fallback must not switch accounts")
+	require.Same(t, err, retErr)
 }
 
 func TestOpenAIWSErrorHTTPStatus(t *testing.T) {

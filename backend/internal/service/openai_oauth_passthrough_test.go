@@ -838,9 +838,11 @@ func TestOpenAIGatewayService_OpenAIPassthrough_429And529TriggerFailover(t *test
 				return fmt.Sprintf(`{"error":{"message":"The usage limit has been reached","type":"usage_limit_reached","resets_at":%d}}`, resetAt)
 			}(),
 			assertRepo: func(t *testing.T, repo *openAIPassthroughFailoverRepo, _ time.Time) {
-				require.Len(t, repo.rateLimitCalls, 1)
+				// OAuth 账号命中 5h/7d 限额（429）走 prewarm 续接绕过：不再本地冻结账号
+				// （不调 SetRateLimited），只返回 UpstreamFailoverError 让上层换号；账号保留在
+				// 池中，限额恢复后仍能被打到。API-key 账号（下方用例）保持原有冻结语义。
+				require.Empty(t, repo.rateLimitCalls)
 				require.Empty(t, repo.overloadCalls)
-				require.True(t, time.Until(repo.rateLimitCalls[0]) > 24*time.Hour)
 			},
 		},
 		{

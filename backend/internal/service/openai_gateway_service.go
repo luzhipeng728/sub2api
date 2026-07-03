@@ -498,19 +498,6 @@ func (s *OpenAIGatewayService) shouldUseOpenAIPrewarmSessionForAccount(account *
 	return !openAIQuotaWindowReset(account.Extra, "5h", now)
 }
 
-// shouldBypassHTTPIngressToOpenAIWSV2 决定 HTTP 入站请求是否升 WSv2 走 prewarm 续接绕限额。
-// prewarm 关 / 非 OAuth 账号:恒真(维持原有无条件 bypass)。
-// OAuth + prewarm 开:仅当账号 5h 接近软上限才升 WSv2(有余量时走普通 HTTP-SSE,省 prewarm 开销)。
-func (s *OpenAIGatewayService) shouldBypassHTTPIngressToOpenAIWSV2(account *Account, now time.Time) bool {
-	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIWS.PrewarmSessionEnabled {
-		return true
-	}
-	if account == nil || account.Type != AccountTypeOAuth {
-		return true
-	}
-	return s.shouldUseOpenAIPrewarmSessionForAccount(account, now)
-}
-
 // isOpenAIHTTPIngressWSV2BypassEnabled 表示是否允许 HTTP 入站请求在账号解析为 WSv2 时走 WSv2 上游。
 func (s *OpenAIGatewayService) isOpenAIHTTPIngressWSV2BypassEnabled() bool {
 	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled
@@ -863,6 +850,54 @@ func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context
 		},
 	})
 	return true
+}
+
+func (s *OpenAIGatewayService) handleOpenAIWSRetryableFallbackExhausted(ctx context.Context, c *gin.Context, account *Account, wsErr error) error {
+	_ = ctx
+	reason, retryable := classifyOpenAIWSReconnectReason(wsErr)
+	if !retryable {
+		return wsErr
+	}
+	if c != nil && c.Writer != nil && c.Writer.Written() {
+		return wsErr
+	}
+
+	safeErr := sanitizeUpstreamErrorMessage(strings.TrimSpace(wsErr.Error()))
+	if safeErr == "" {
+		safeErr = "upstream websocket request failed"
+	}
+	reason = strings.TrimSpace(reason)
+	detail := safeErr
+	if reason != "" {
+		detail = fmt.Sprintf("%s: %s", reason, safeErr)
+	}
+	setOpsUpstreamError(c, http.StatusBadGateway, "upstream websocket retry exhausted", detail)
+	if account != nil {
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: http.StatusBadGateway,
+			Kind:               "failover",
+			Message:            "upstream websocket retry exhausted",
+			Detail:             detail,
+		})
+	}
+
+	body, err := json.Marshal(gin.H{
+		"error": gin.H{
+			"type":    "upstream_error",
+			"message": "Upstream request failed",
+			"reason":  reason,
+		},
+	})
+	if err != nil || len(body) == 0 {
+		body = openAITransportFailoverBody
+	}
+	return &UpstreamFailoverError{
+		StatusCode:   http.StatusBadGateway,
+		ResponseBody: body,
+	}
 }
 
 func (s *OpenAIGatewayService) openAIWSRetryBackoff(attempt int) time.Duration {
@@ -1370,11 +1405,7 @@ func (s *OpenAIGatewayService) BindStickySession(ctx context.Context, groupID *i
 	if sessionHash == "" || accountID <= 0 {
 		return nil
 	}
-	ttl := openaiStickySessionTTL
-	if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds > 0 {
-		ttl = time.Duration(s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds) * time.Second
-	}
-	return s.setStickySessionAccountID(ctx, groupID, sessionHash, accountID, ttl)
+	return s.setStickySessionAccountID(ctx, groupID, sessionHash, accountID, s.openAIWSSessionStickyTTL())
 }
 
 // SelectAccount selects an OpenAI account with sticky session support
@@ -1750,7 +1781,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 	// 4. 设置粘性会话绑定
 	// Set sticky session binding
 	if sessionHash != "" {
-		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, openaiStickySessionTTL)
+		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, s.openAIWSSessionStickyTTL())
 	}
 
 	return hydrated, nil
@@ -1813,7 +1844,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 
 	// 刷新会话 TTL 并返回账号
 	// Refresh session TTL and return account
-	_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+	_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, s.openAIWSSessionStickyTTL())
 	return account
 }
 
@@ -2010,7 +2041,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							if selectErr != nil {
 								return nil, selectErr
 							}
-							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, s.openAIWSSessionStickyTTL())
 							return selection, nil
 						}
 
@@ -2143,7 +2174,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					return nil, true, selectErr
 				}
 				if sessionHash != "" {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, s.openAIWSSessionStickyTTL())
 				}
 				return selection, true, nil
 			}
@@ -2177,7 +2208,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					return nil, selectErr
 				}
 				if sessionHash != "" {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, s.openAIWSSessionStickyTTL())
 				}
 				return selection, nil
 			}
@@ -2506,8 +2537,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if clientTransport == OpenAIClientTransportHTTP &&
 		wsDecision.Transport == OpenAIUpstreamTransportHTTPSSE &&
 		s.isOpenAIHTTPIngressWSV2BypassEnabled() &&
-		s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 &&
-		s.shouldBypassHTTPIngressToOpenAIWSV2(account, time.Now()) {
+		s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
 		wsDecision = OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
 			Reason:    "http_ingress_ws_v2_bypass",
@@ -3131,8 +3161,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			return wsResult, nil
 		}
-		s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)
-		return nil, wsErr
+		failoverErr := s.handleOpenAIWSRetryableFallbackExhausted(ctx, c, account, wsErr)
+		var upstreamFailoverErr *UpstreamFailoverError
+		if errors.As(failoverErr, &upstreamFailoverErr) {
+			return nil, failoverErr
+		}
+		s.writeOpenAIWSFallbackErrorResponse(c, account, failoverErr)
+		return nil, failoverErr
 	}
 
 	httpInvalidEncryptedContentRetryTried := false

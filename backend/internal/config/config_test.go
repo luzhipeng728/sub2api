@@ -87,6 +87,19 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultGatewayMaxAccountSwitches(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Gateway.MaxAccountSwitches != 40 {
+		t.Fatalf("Gateway.MaxAccountSwitches = %d, want 40", cfg.Gateway.MaxAccountSwitches)
+	}
+}
+
 func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	resetViperWithJWTSecret(t)
 

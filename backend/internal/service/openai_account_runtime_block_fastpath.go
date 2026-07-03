@@ -2,17 +2,19 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
 const (
 	openAIAccountStateUpdateTimeout       = 5 * time.Second
-	openAIOAuth429FallbackCooldown        = 5 * time.Second
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
-	openAIOAuth429StormMaxAccountSwitches = 1
+	openAIOAuth429StormMaxAccountSwitches = 40
 	// openAIWSDialFailoverCooldown: WS 握手返回账号级错误(401/403/5xx)时对该账号的冷却时长。
 	// 让坏账号(如 Cloudflare 拒绝握手 403)被短暂剔除调度并把请求 failover 到健康账号。
 	openAIWSDialFailoverCooldown = 60 * time.Second
@@ -35,22 +37,6 @@ func isOpenAIAccount(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) bool {
-	// prewarm session 启用时，跳过上游错误处理（不写 DB rate_limited、不 block、不 disable）：
-	// prewarm 的设计就是让限额账号（会返回 429）通过续接绕过限额。
-	// chat/completions 等走 HTTP 上游的路径遇到 429 时，如果不跳过，会把每个账号都
-	// 写 DB rate_limited_at → 后续所有请求（含 /v1/responses）都排除该账号 → 503。
-	// 只处理图片限流（不影响调度）。
-	if s != nil && s.isOpenAIPrewarmSessionEnabled() {
-		if isOpenAIImageRateLimitError(statusCode, responseBody) {
-			if s.rateLimitService != nil {
-				stateCtx, cancel := openAIAccountStateContext(ctx)
-				defer cancel()
-				_ = s.rateLimitService.HandleOpenAIImageRateLimit(stateCtx, account, statusCode, headers, responseBody)
-			}
-		}
-		return false
-	}
-
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 
@@ -62,7 +48,20 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 
 	if statusCode == http.StatusTooManyRequests {
-		s.markOpenAIOAuth429RateLimited(stateCtx, account, headers, responseBody)
+		if isOpenAIOAuthAccount(account) {
+			s.observeOpenAIOAuth429(stateCtx, account, headers, responseBody)
+			return false
+		}
+	}
+	// prewarm session 启用时，5h/7d 等 429 不作为账号不可调度条件；
+	// 401/403 是账号/边缘权限类错误，继续交给 RateLimitService 做临时不可调度或禁用。
+	if s != nil && s.isOpenAIPrewarmSessionEnabled() {
+		switch statusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			// fall through
+		default:
+			return false
+		}
 	}
 	if s == nil || account == nil || s.rateLimitService == nil {
 		return false
@@ -71,49 +70,61 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		return true
 	}
 	shouldDisable := s.rateLimitService.HandleUpstreamError(stateCtx, account, statusCode, headers, responseBody)
-	// 注意：prewarm 启用时 BlockAccountScheduling 源头会跳过 "upstream_disable" reason。
 	if shouldDisable {
 		s.BlockAccountScheduling(account, time.Time{}, "upstream_disable")
 	}
 	return shouldDisable
 }
 
-func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+func (s *OpenAIGatewayService) observeOpenAIOAuth429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
 	if s == nil || !isOpenAIOAuthAccount(account) {
 		return
 	}
-	// 注意：prewarm 启用时 BlockAccountScheduling 源头会跳过 "429" reason，无需在此判断。
 	s.recordOpenAIOAuth429()
-
-	cooldownUntil := time.Now().Add(openAIOAuth429FallbackCooldown)
-	if s.rateLimitService != nil {
-		if resetAt := s.rateLimitService.calculateOpenAI429ResetTime(headers); resetAt != nil && resetAt.After(time.Now()) {
-			cooldownUntil = *resetAt
-		} else if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
-			if resetAt := time.Unix(*resetUnix, 0); resetAt.After(time.Now()) {
-				cooldownUntil = resetAt
-			}
-		} else if cooldown, ok := s.rateLimitService.get429FallbackCooldown(ctx, account); ok && cooldown > 0 {
-			cooldownUntil = time.Now().Add(cooldown)
-		}
+	if s.rateLimitService == nil || s.rateLimitService.accountRepo == nil {
+		return
 	}
-	s.BlockAccountScheduling(account, cooldownUntil, "429")
+	persistOpenAI429PlanType(ctx, s.rateLimitService.accountRepo, account, responseBody)
+	s.rateLimitService.persistOpenAICodexSnapshot(ctx, account, headers)
+}
+
+func (s *OpenAIGatewayService) handleOpenAIWSDialAccountFailure(ctx context.Context, account *Account, statusCode int, cause string) {
+	if s == nil || !isOpenAIAccount(account) {
+		return
+	}
+	reason := fmt.Sprintf("ws_dial_%d", statusCode)
+	if statusCode != http.StatusUnauthorized {
+		s.BlockAccountScheduling(account, time.Now().Add(openAIWSDialFailoverCooldown), reason)
+		return
+	}
+
+	s.BlockAccountScheduling(account, time.Time{}, reason)
+	if s.accountRepo == nil {
+		return
+	}
+	errorMsg := "WS dial 401: account authentication failed"
+	if trimmed := strings.TrimSpace(cause); trimmed != "" {
+		errorMsg = "WS dial 401: " + trimmed
+	}
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	if err := setAccountDisabledOrError(stateCtx, s.accountRepo, account.ID, errorMsg); err != nil {
+		slog.Warn("openai_ws_dial_401_set_disabled_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	slog.Warn("openai_ws_dial_401_account_disabled", "account_id", account.ID)
 }
 
 func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until time.Time, reason string) {
 	if s == nil || !isOpenAIAccount(account) {
 		return
 	}
-	// prewarm session 启用时，跳过「限额/限流/上游错误」类的 runtime block：
-	// prewarm 的设计就是让限额账号（会返回 429/rate_limit）通过续接绕过限额。
-	// 这些 block 会导致限额账号被内存排除 → 多个账号轮流 block → no available accounts → 503。
-	// 只保留 token 类硬错误的 block（token 坏了 prewarm 也没用）。
+	// prewarm session 启用时仍跳过传输类抖动，但保留会影响调度正确性的账号级错误：
+	// - 429 仅统计/记录使用状态，不进入 runtime block，让续接/新锚点持续尝试。
+	// - 401 使用已有禁用逻辑，坏凭证不会继续抢流量。
+	// - WS 握手 403/5xx 只做短 runtime block，不禁用账号；代理/边缘冷却时避免同账号反复抢流量。
 	if s.isOpenAIPrewarmSessionEnabled() {
-		switch reason {
-		case "missing_refresh_token", "token_refresh_failed", "auth_failed":
-			// token 类硬错误，保留 block
-		default:
-			// 限额/限流/上游错误/传输错误等，prewarm 启用时跳过
+		if !isOpenAIPrewarmRuntimeBlockReasonAllowed(reason) {
 			return
 		}
 	}
@@ -149,6 +160,18 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 	}
 }
 
+func isOpenAIPrewarmRuntimeBlockReasonAllowed(reason string) bool {
+	switch reason {
+	case "openai_403_temp", "oauth_401",
+		"missing_refresh_token", "token_refresh_failed", "token_refresh_non_retryable",
+		"token_refresh_retry_exhausted", "auth_failed", "auth_error", "upstream_disable",
+		"ws_dial_401":
+		return true
+	default:
+		return strings.HasPrefix(reason, "ws_dial_")
+	}
+}
+
 func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	if s == nil || accountID <= 0 {
 		return
@@ -159,6 +182,9 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
 	if s == nil || !isOpenAIAccount(account) {
 		return false
+	}
+	if s.isOpenAIWSProxyRuntimeBlocked(account) {
+		return true
 	}
 	value, ok := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
 	if !ok {
@@ -174,6 +200,21 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
 	return false
+}
+
+func (s *OpenAIGatewayService) isOpenAIWSProxyRuntimeBlocked(account *Account) bool {
+	if s == nil || account == nil || account.Proxy == nil {
+		return false
+	}
+	proxyURL := strings.TrimSpace(account.Proxy.URL())
+	if proxyURL == "" {
+		return false
+	}
+	pool := s.getOpenAIWSConnPool()
+	if pool == nil {
+		return false
+	}
+	return pool.proxyBreakerOpen(proxyURL)
 }
 
 func (s *OpenAIGatewayService) recordOpenAIOAuth429() {

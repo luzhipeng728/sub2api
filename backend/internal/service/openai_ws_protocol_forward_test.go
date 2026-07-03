@@ -351,6 +351,65 @@ func TestOpenAIGatewayService_Forward_HTTPIngressWSV2BypassNonWSv2Account(t *tes
 		"账号非 WSv2 时即使 bypass 开启也不应走 WSv2")
 }
 
+// TestOpenAIGatewayService_Forward_HTTPIngressWSV2BypassOAuthPrewarm 回归测试 da53169d 的路由门控：
+// OAuth 账号 + prewarm session 开启 + 账号仍有 5h 余量（无 codex_5h_used_percent）时，
+// HTTP 入站必须继续升 WSv2，而不是因「未接近 5h 软上限」降级到原生 HTTP/SSE 上游
+// （原生路径对大 /v1/responses 历史会 502，导致池吞吐塌方，见 openai-routing-incident-2026-07-02）。
+// 修复前 shouldBypassHTTPIngressToOpenAIWSV2 会对该场景返回 false → 误判为 HTTPSSE。
+func TestOpenAIGatewayService_Forward_HTTPIngressWSV2BypassOAuthPrewarm(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":2}}`)),
+		},
+	}
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.HTTPIngressWSV2BypassEnabled = true
+	// 关键：prewarm 开启。修复前此开关会触发「仅接近 5h 上限才 bypass」的错误门控。
+	cfg.Gateway.OpenAIWS.PrewarmSessionEnabled = true
+
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+	}
+
+	account := &Account{
+		ID:          204,
+		Name:        "openai-oauth-wsv2-prewarm",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-test-token"},
+		// 有 5h 余量：不设置 codex_5h_used_percent。
+		Extra: map[string]any{"responses_websockets_v2_enabled": true},
+	}
+
+	body := []byte(`{"model":"gpt-5","stream":false,"input":[{"type":"input_text","text":"hi"}]}`)
+	// Forward 会因无 WS 连接池而失败返回 error，但 transport decision 已写入 context。
+	_, _ = svc.Forward(context.Background(), c, account, body)
+
+	decision, _ := c.Get("openai_ws_transport_decision")
+	reason, _ := c.Get("openai_ws_transport_reason")
+	require.Equal(t, string(OpenAIUpstreamTransportResponsesWebsocketV2), decision,
+		"OAuth + prewarm 开 + 有 5h 余量时 HTTP 入站仍应升 WSv2（回归 da53169d 路由门控）")
+	require.Equal(t, "http_ingress_ws_v2_bypass", reason)
+}
+
 func TestOpenAIGatewayService_Forward_HTTPIngressRetriesInvalidEncryptedContentOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	wsFallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

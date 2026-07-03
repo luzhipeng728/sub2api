@@ -3331,6 +3331,7 @@ export default {
       },
       status: {
         active: '正常',
+        disabled: '已禁用',
         inactive: '停用',
         error: '错误',
         cooldown: '冷却中',

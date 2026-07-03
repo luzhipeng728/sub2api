@@ -734,6 +734,36 @@ func logOpenAIWSBindResponseAccountWarn(groupID, accountID int64, responseID str
 	)
 }
 
+func recordOpenAIWSFailoverOpsEvent(c *gin.Context, account *Account, statusCode int, message string, body []byte, headers http.Header) {
+	if c == nil || account == nil || statusCode <= 0 {
+		return
+	}
+	msg := sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
+	if msg == "" {
+		if statusCode == http.StatusTooManyRequests {
+			msg = "upstream websocket rate limit exceeded"
+		} else {
+			msg = "upstream websocket error"
+		}
+	}
+	detail := ""
+	if len(body) > 0 {
+		detail = truncateString(string(body), 2048)
+	}
+	setOpsUpstreamError(c, statusCode, msg, detail)
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		Platform:             account.Platform,
+		AccountID:            account.ID,
+		AccountName:          account.Name,
+		UpstreamStatusCode:   statusCode,
+		UpstreamRequestID:    headers.Get("x-request-id"),
+		Kind:                 "failover",
+		Message:              msg,
+		Detail:               detail,
+		UpstreamResponseBody: detail,
+	})
+}
+
 func summarizeOpenAIWSReadCloseError(err error) (status string, reason string) {
 	if err == nil {
 		return "-", "-"
@@ -1955,11 +1985,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if code == http.StatusTooManyRequests {
 				// 429 维持原有语义（持久化限额信号 + 走 fallback 响应），不改动。
 				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
+				recordOpenAIWSFailoverOpsEvent(c, account, code, strings.TrimSpace(err.Error()), nil, dialErr.ResponseHeaders)
 			} else if code == http.StatusUnauthorized || code == http.StatusForbidden || code >= 500 {
 				// 账号级 WS 握手失败(401/403/5xx，如 Cloudflare 拒绝握手)：冷却该账号 +
 				// 返回 UpstreamFailoverError 让 handler 切换到健康账号，而不是把上游错误直接返回客户端。
 				// 仅在尚未向客户端写出任何字节时才 failover（握手阶段必然未写）。
-				s.BlockAccountScheduling(account, time.Now().Add(openAIWSDialFailoverCooldown), fmt.Sprintf("ws_dial_%d", code))
+				s.handleOpenAIWSDialAccountFailure(ctx, account, code, strings.TrimSpace(err.Error()))
 				if c == nil || c.Writer == nil || !c.Writer.Written() {
 					return nil, &UpstreamFailoverError{
 						StatusCode:      code,
@@ -2302,6 +2333,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			)
 			if !wroteDownstream && isRateLimitedEvent {
 				lease.MarkBroken()
+				recordOpenAIWSFailoverOpsEvent(c, account, http.StatusTooManyRequests, errMsg, message, lease.HandshakeHeaders())
 				return nil, &UpstreamFailoverError{
 					StatusCode:      http.StatusTooManyRequests,
 					ResponseBody:    append([]byte(nil), message...),
@@ -3126,6 +3158,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			var dialErr *openAIWSDialError
 			if errors.As(acquireErr, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
 				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(acquireErr.Error()))
+				recordOpenAIWSFailoverOpsEvent(c, account, http.StatusTooManyRequests, strings.TrimSpace(acquireErr.Error()), nil, dialErr.ResponseHeaders)
 				return nil, &UpstreamFailoverError{
 					StatusCode:      http.StatusTooManyRequests,
 					ResponseHeaders: cloneHeader(dialErr.ResponseHeaders),
@@ -3307,6 +3340,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 				if !wroteDownstream && isOpenAIWSRateLimitError(errCodeRaw, errTypeRaw, errMsgRaw) {
 					lease.MarkBroken()
+					recordOpenAIWSFailoverOpsEvent(c, account, http.StatusTooManyRequests, errMsgRaw, upstreamMessage, lease.HandshakeHeaders())
 					return nil, &UpstreamFailoverError{
 						StatusCode:      http.StatusTooManyRequests,
 						ResponseBody:    append([]byte(nil), upstreamMessage...),

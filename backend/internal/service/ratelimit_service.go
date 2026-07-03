@@ -232,7 +232,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if upstreamMsg != "" {
 				msg = "Token revoked (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			s.handleDisabledAuthError(ctx, account, msg)
 			shouldDisable = true
 			break
 		}
@@ -242,7 +242,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if upstreamMsg != "" {
 				msg = "Unauthorized (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			s.handleDisabledAuthError(ctx, account, msg)
 			shouldDisable = true
 			break
 		}
@@ -262,7 +262,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				if upstreamMsg != "" {
 					msg = "OAuth 401 (no refresh_token): " + upstreamMsg
 				}
-				s.handleAuthError(ctx, account, msg)
+				s.handleDisabledAuthError(ctx, account, msg)
 				shouldDisable = true
 				break
 			}
@@ -290,12 +290,17 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			}
 			shouldDisable = true
 		} else {
-			// 非 OAuth / Antigravity OAuth：保持 SetError 行为
 			msg := "Authentication failed (401): invalid or expired credentials"
 			if upstreamMsg != "" {
 				msg = "Authentication failed (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			if account.Platform == PlatformOpenAI {
+				// OpenAI/Codex 401 是不可恢复认证失败，直接禁用账号。
+				s.handleDisabledAuthError(ctx, account, msg)
+			} else {
+				// 非 OpenAI 平台保持原有 error 状态语义。
+				s.handleAuthError(ctx, account, msg)
+			}
 			shouldDisable = true
 		}
 	case 402:
@@ -731,6 +736,28 @@ func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account
 	slog.Warn("account_disabled_auth_error", "account_id", account.ID, "error", errorMsg)
 }
 
+type accountDisabledSetter interface {
+	SetDisabled(ctx context.Context, id int64, errorMsg string) error
+}
+
+func setAccountDisabledOrError(ctx context.Context, repo AccountRepository, accountID int64, errorMsg string) error {
+	if disabler, ok := repo.(accountDisabledSetter); ok {
+		return disabler.SetDisabled(ctx, accountID, errorMsg)
+	}
+	return repo.SetError(ctx, accountID, errorMsg)
+}
+
+// handleDisabledAuthError handles permanent auth failures that should appear as
+// disabled in the admin UI, while preserving SetError fallback for old test repos.
+func (s *RateLimitService) handleDisabledAuthError(ctx context.Context, account *Account, errorMsg string) {
+	s.notifyAccountSchedulingBlocked(account, time.Time{}, "auth_error")
+	if err := setAccountDisabledOrError(ctx, s.accountRepo, account.ID, errorMsg); err != nil {
+		slog.Warn("account_set_disabled_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	slog.Warn("account_disabled_auth_error", "account_id", account.ID, "error", errorMsg)
+}
+
 func buildForbiddenErrorMessage(prefix string, upstreamMsg string, responseBody []byte, fallback string) string {
 	prefix = strings.TrimSpace(prefix)
 	if prefix != "" && !strings.HasSuffix(prefix, " ") {
@@ -885,6 +912,10 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	if account.Platform == PlatformOpenAI {
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
+		if account.Type == AccountTypeOAuth {
+			slog.Info("openai_oauth_429_observed_without_cooldown", "account_id", account.ID)
+			return
+		}
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
 			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
@@ -925,6 +956,10 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	if resetTimestamp == "" {
 		switch account.Platform {
 		case PlatformOpenAI:
+			if account.Type == AccountTypeOAuth {
+				slog.Info("openai_oauth_429_body_reset_observed_without_cooldown", "account_id", account.ID)
+				return
+			}
 			// 尝试解析 OpenAI 的 usage_limit_reached 错误
 			if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)

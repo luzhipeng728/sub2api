@@ -69,7 +69,7 @@ usage_agg AS (
     (bucket_start, platform, group_id)
   )
 ),
-error_base AS (
+error_row_base AS (
   SELECT
     date_trunc('hour', created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket_start,
     -- platform is NULL for some early-phase errors (e.g. before routing); map to a sentinel
@@ -77,32 +77,87 @@ error_base AS (
     COALESCE(platform, 'unknown') AS platform,
     group_id AS group_id,
     is_business_limited AS is_business_limited,
-    error_owner AS error_owner,
-    status_code AS client_status_code,
-    COALESCE(upstream_status_code, status_code, 0) AS effective_status_code
+    status_code AS client_status_code
   FROM ops_error_logs
   -- Exclude count_tokens requests from error metrics as they are informational probes
   WHERE created_at >= $1 AND created_at < $2
     AND is_count_tokens = FALSE
 ),
-error_agg AS (
+error_row_agg AS (
   SELECT
     bucket_start,
     CASE WHEN GROUPING(platform) = 1 THEN NULL ELSE platform END AS platform,
     CASE WHEN GROUPING(group_id) = 1 THEN NULL ELSE group_id END AS group_id,
     COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400) AS error_count_total,
     COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400 AND is_business_limited) AS business_limited_count,
-    COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400 AND NOT is_business_limited) AS error_count_sla,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) NOT IN (429, 529)) AS upstream_error_count_excl_429_529,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) = 429) AS upstream_429_count,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) = 529) AS upstream_529_count
-  FROM error_base
+    COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400 AND NOT is_business_limited) AS error_count_sla
+  FROM error_row_base
   GROUP BY GROUPING SETS (
     (bucket_start),
     (bucket_start, platform),
     (bucket_start, platform, group_id)
   )
   HAVING GROUPING(group_id) = 1 OR group_id IS NOT NULL
+),
+upstream_event_base AS (
+  SELECT
+    date_trunc('hour', e.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket_start,
+    COALESCE(e.platform, 'unknown') AS platform,
+    e.group_id AS group_id,
+    COALESCE(NULLIF(ev->>'upstream_status_code', '')::int, 0) AS effective_status_code
+  FROM ops_error_logs e
+  CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(NULLIF(e.upstream_errors, 'null'::jsonb), '[]'::jsonb)
+  ) AS ev
+  WHERE e.created_at >= $1 AND e.created_at < $2
+    AND e.is_count_tokens = FALSE
+    AND e.error_owner = 'provider'
+    AND NOT e.is_business_limited
+  UNION ALL
+  SELECT
+    date_trunc('hour', e.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket_start,
+    COALESCE(e.platform, 'unknown') AS platform,
+    e.group_id AS group_id,
+    COALESCE(e.upstream_status_code, e.status_code, 0) AS effective_status_code
+  FROM ops_error_logs e
+  WHERE e.created_at >= $1 AND e.created_at < $2
+    AND e.is_count_tokens = FALSE
+    AND e.error_owner = 'provider'
+    AND NOT e.is_business_limited
+    AND jsonb_array_length(COALESCE(NULLIF(e.upstream_errors, 'null'::jsonb), '[]'::jsonb)) = 0
+),
+upstream_agg AS (
+  SELECT
+    bucket_start,
+    CASE WHEN GROUPING(platform) = 1 THEN NULL ELSE platform END AS platform,
+    CASE WHEN GROUPING(group_id) = 1 THEN NULL ELSE group_id END AS group_id,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) NOT IN (429, 529)) AS upstream_error_count_excl_429_529,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 429) AS upstream_429_count,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 529) AS upstream_529_count
+  FROM upstream_event_base
+  GROUP BY GROUPING SETS (
+    (bucket_start),
+    (bucket_start, platform),
+    (bucket_start, platform, group_id)
+  )
+  HAVING GROUPING(group_id) = 1 OR group_id IS NOT NULL
+),
+error_agg AS (
+  SELECT
+    COALESCE(r.bucket_start, u.bucket_start) AS bucket_start,
+    COALESCE(r.platform, u.platform) AS platform,
+    COALESCE(r.group_id, u.group_id) AS group_id,
+    COALESCE(r.error_count_total, 0) AS error_count_total,
+    COALESCE(r.business_limited_count, 0) AS business_limited_count,
+    COALESCE(r.error_count_sla, 0) AS error_count_sla,
+    COALESCE(u.upstream_error_count_excl_429_529, 0) AS upstream_error_count_excl_429_529,
+    COALESCE(u.upstream_429_count, 0) AS upstream_429_count,
+    COALESCE(u.upstream_529_count, 0) AS upstream_529_count
+  FROM error_row_agg r
+  FULL OUTER JOIN upstream_agg u
+    ON u.bucket_start = r.bucket_start
+   AND COALESCE(u.platform, '') = COALESCE(r.platform, '')
+   AND COALESCE(u.group_id, 0) = COALESCE(r.group_id, 0)
 ),
 combined AS (
   SELECT

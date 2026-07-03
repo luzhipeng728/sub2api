@@ -530,16 +530,49 @@ func (c *OpsMetricsCollector) queryErrorCounts(ctx context.Context, start, end t
 	err error,
 ) {
 	q := `
+WITH base AS (
+  SELECT *
+  FROM ops_error_logs
+  WHERE created_at >= $1 AND created_at < $2
+    AND is_count_tokens = FALSE
+),
+row_counts AS (
+  SELECT
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400), 0) AS error_total,
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited), 0) AS business_limited,
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited), 0) AS error_sla
+  FROM base
+),
+upstream_events AS (
+  SELECT COALESCE(NULLIF(ev->>'upstream_status_code', '')::int, 0) AS effective_status_code
+  FROM base b
+  CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(NULLIF(b.upstream_errors, 'null'::jsonb), '[]'::jsonb)
+  ) AS ev
+  WHERE b.error_owner = 'provider' AND NOT b.is_business_limited
+  UNION ALL
+  SELECT COALESCE(b.upstream_status_code, b.status_code, 0) AS effective_status_code
+  FROM base b
+  WHERE b.error_owner = 'provider'
+    AND NOT b.is_business_limited
+    AND jsonb_array_length(COALESCE(NULLIF(b.upstream_errors, 'null'::jsonb), '[]'::jsonb)) = 0
+),
+upstream_counts AS (
+  SELECT
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) NOT IN (429, 529)), 0) AS upstream_excl,
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 429), 0) AS upstream_429,
+    COALESCE(COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 529), 0) AS upstream_529
+  FROM upstream_events
+)
 SELECT
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400), 0) AS error_total,
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited), 0) AS business_limited,
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited), 0) AS error_sla,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)), 0) AS upstream_excl,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 429), 0) AS upstream_429,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 529), 0) AS upstream_529
-FROM ops_error_logs
-WHERE created_at >= $1 AND created_at < $2
-  AND is_count_tokens = FALSE`
+  row_counts.error_total,
+  row_counts.business_limited,
+  row_counts.error_sla,
+  upstream_counts.upstream_excl,
+  upstream_counts.upstream_429,
+  upstream_counts.upstream_529
+FROM row_counts
+CROSS JOIN upstream_counts`
 
 	if err := c.db.QueryRowContext(ctx, q, start, end).Scan(
 		&errorTotal,

@@ -169,6 +169,16 @@ func TestOpenAIGatewayService_Forward_WSv2ErrorEventUsageLimitTriggersFailover(t
 	require.Nil(t, upstream.lastReq, "WS 限流 error event 不应回退到同账号 HTTP")
 	require.Len(t, repo.rateLimitCalls, 1)
 	require.WithinDuration(t, time.Unix(resetAt, 0), repo.rateLimitCalls[0], 2*time.Second)
+
+	rawEvents, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "WS 限流 failover 应记录 upstream error event 供 ops 统计 429")
+	events, ok := rawEvents.([]*OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.Len(t, events, 1)
+	require.Equal(t, account.ID, events[0].AccountID)
+	require.Equal(t, http.StatusTooManyRequests, events[0].UpstreamStatusCode)
+	require.Equal(t, "failover", events[0].Kind)
+	require.Contains(t, events[0].Message, "usage limit")
 }
 
 func TestOpenAIGatewayService_Forward_WSv2Handshake429PersistsRateLimit(t *testing.T) {

@@ -449,17 +449,57 @@ func (r *opsRepository) GetErrorTrend(ctx context.Context, filter *service.OpsDa
 	bucketExpr := opsBucketExprForError(bucketSeconds)
 
 	q := `
-SELECT
-  ` + bucketExpr + ` AS bucket,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400) AS error_total,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited) AS business_limited,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited) AS error_sla,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)) AS upstream_excl,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 429) AS upstream_429,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 529) AS upstream_529
-FROM ops_error_logs
+WITH base AS (
+  SELECT *
+  FROM ops_error_logs
 ` + where + `
-GROUP BY 1
+),
+row_buckets AS (
+  SELECT
+    ` + bucketExpr + ` AS bucket,
+    COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400) AS error_total,
+    COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited) AS business_limited,
+    COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited) AS error_sla
+  FROM base
+  GROUP BY 1
+),
+upstream_events AS (
+  SELECT
+    ` + bucketExpr + ` AS bucket,
+    COALESCE(NULLIF(ev->>'upstream_status_code', '')::int, 0) AS effective_status_code
+  FROM base
+  CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(NULLIF(upstream_errors, 'null'::jsonb), '[]'::jsonb)
+  ) AS ev
+  WHERE error_owner = 'provider' AND NOT is_business_limited
+  UNION ALL
+  SELECT
+    ` + bucketExpr + ` AS bucket,
+    COALESCE(upstream_status_code, status_code, 0) AS effective_status_code
+  FROM base
+  WHERE error_owner = 'provider'
+    AND NOT is_business_limited
+    AND jsonb_array_length(COALESCE(NULLIF(upstream_errors, 'null'::jsonb), '[]'::jsonb)) = 0
+),
+upstream_buckets AS (
+  SELECT
+    bucket,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) NOT IN (429, 529)) AS upstream_excl,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 429) AS upstream_429,
+    COUNT(*) FILTER (WHERE COALESCE(effective_status_code, 0) = 529) AS upstream_529
+  FROM upstream_events
+  GROUP BY 1
+)
+SELECT
+  COALESCE(r.bucket, u.bucket) AS bucket,
+  COALESCE(r.error_total, 0) AS error_total,
+  COALESCE(r.business_limited, 0) AS business_limited,
+  COALESCE(r.error_sla, 0) AS error_sla,
+  COALESCE(u.upstream_excl, 0) AS upstream_excl,
+  COALESCE(u.upstream_429, 0) AS upstream_429,
+  COALESCE(u.upstream_529, 0) AS upstream_529
+FROM row_buckets r
+FULL OUTER JOIN upstream_buckets u ON u.bucket = r.bucket
 ORDER BY 1 ASC`
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
@@ -561,14 +601,35 @@ func (r *opsRepository) GetErrorDistribution(ctx context.Context, filter *servic
 	where, args, _ := buildErrorWhere(filter, start, end, 1)
 
 	q := `
+WITH base AS (
+  SELECT *
+  FROM ops_error_logs
+` + where + `
+),
+status_events AS (
+  SELECT
+    COALESCE(NULLIF(ev->>'upstream_status_code', '')::int, 0) AS status_code,
+    FALSE AS is_business_limited
+  FROM base
+  CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(NULLIF(upstream_errors, 'null'::jsonb), '[]'::jsonb)
+  ) AS ev
+  WHERE error_owner = 'provider' AND NOT is_business_limited
+  UNION ALL
+  SELECT
+    COALESCE(upstream_status_code, status_code, 0) AS status_code,
+    is_business_limited
+  FROM base
+  WHERE COALESCE(status_code, 0) >= 400
+    AND jsonb_array_length(COALESCE(NULLIF(upstream_errors, 'null'::jsonb), '[]'::jsonb)) = 0
+)
 SELECT
-  COALESCE(upstream_status_code, status_code, 0) AS status_code,
+  status_code,
   COUNT(*) AS total,
   COUNT(*) FILTER (WHERE NOT is_business_limited) AS sla,
   COUNT(*) FILTER (WHERE is_business_limited) AS business_limited
-FROM ops_error_logs
-` + where + `
-  AND COALESCE(status_code, 0) >= 400
+FROM status_events
+WHERE COALESCE(status_code, 0) >= 400
 GROUP BY 1
 ORDER BY total DESC
 LIMIT 20`
