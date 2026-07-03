@@ -1581,7 +1581,16 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 // 仅适用于 Anthropic OAuth/SetupToken 类型账号
 // 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征
 func (a *Account) IsTLSFingerprintEnabled() bool {
-	// 仅支持 Anthropic OAuth/SetupToken 账号
+	// OpenAI OAuth(codex)默认启用:WS 握手要用 codex/Chrome 指纹过 Cloudflare(可 extra 显式关)。
+	if a.IsOpenAIOAuth() {
+		if a.Extra != nil {
+			if v, ok := a.Extra["enable_tls_fingerprint"].(bool); ok {
+				return v
+			}
+		}
+		return true
+	}
+	// 其余仅支持 Anthropic OAuth/SetupToken 账号(显式 opt-in)
 	if !a.IsAnthropicOAuthOrSetupToken() {
 		return false
 	}

@@ -190,6 +190,10 @@ func (s *TLSFingerprintProfileService) ResolveTLSProfile(account *Account) *tlsf
 			return p
 		}
 	}
+	// OpenAI OAuth(codex):用 codex WS 指纹(utls Chrome-131 预设 + ALPN http/1.1),本地实测过 CF。
+	if account.IsOpenAIOAuth() {
+		return tlsfingerprint.CodexCLIWSProfile()
+	}
 	// TLS 启用但无绑定 profile → 空 Profile → dialer 使用内置默认值
 	return &tlsfingerprint.Profile{Name: "Built-in Default (Node.js 24.x)"}
 }

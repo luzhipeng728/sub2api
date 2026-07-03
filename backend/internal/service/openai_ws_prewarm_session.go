@@ -78,6 +78,7 @@ func (s *OpenAIGatewayService) performOpenAIWSPrewarmSession(
 		Account:      account,
 		WSURL:        wsURL,
 		Headers:      headers,
+		TLSProfile:   s.resolveWSTLSProfile(account),
 		ForceNewConn: false,
 		ProxyURL: func() string {
 			if account.ProxyID != nil && account.Proxy != nil {

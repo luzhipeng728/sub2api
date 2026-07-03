@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -60,10 +61,12 @@ func (e *openAIWSDialError) Unwrap() error {
 }
 
 type openAIWSAcquireRequest struct {
-	Account         *Account
-	WSURL           string
-	Headers         http.Header
-	ProxyURL        string
+	Account  *Account
+	WSURL    string
+	Headers  http.Header
+	ProxyURL string
+	// TLSProfile 非空时,WS 握手用 utls 伪装该 TLS 指纹(与 HTTP 上游一致);nil 则用原生 TLS。
+	TLSProfile      *tlsfingerprint.Profile
 	PreferredConnID string
 	// ForceNewConn: 强制本次获取新连接（避免复用导致连接内续链状态互相污染）。
 	ForceNewConn bool
@@ -1614,7 +1617,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		return nil, &openAIWSDialError{StatusCode: 0, Err: fmt.Errorf("handshake slot wait: %w", err)}
 	}
 	defer release()
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, req.Headers, req.ProxyURL)
+	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, req.Headers, req.ProxyURL, req.TLSProfile)
 	if err != nil {
 		if status == http.StatusForbidden {
 			p.recordProxyHandshake403(req.ProxyURL)
