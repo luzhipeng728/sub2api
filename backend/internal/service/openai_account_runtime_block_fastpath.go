@@ -93,7 +93,9 @@ func (s *OpenAIGatewayService) handleOpenAIWSDialAccountFailure(ctx context.Cont
 		return
 	}
 	reason := fmt.Sprintf("ws_dial_%d", statusCode)
-	if statusCode != http.StatusUnauthorized {
+	// 401(token 失效)/402(无有效订阅) 是账号级死号:握手已到 OpenAI、账号本身不可用,
+	// 永久禁用避免持续空转。403(Cloudflare 边缘拦截)/5xx 不是账号的错,只做短冷却。
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusPaymentRequired {
 		s.BlockAccountScheduling(account, time.Now().Add(openAIWSDialFailoverCooldown), reason)
 		return
 	}
@@ -102,17 +104,17 @@ func (s *OpenAIGatewayService) handleOpenAIWSDialAccountFailure(ctx context.Cont
 	if s.accountRepo == nil {
 		return
 	}
-	errorMsg := "WS dial 401: account authentication failed"
+	errorMsg := fmt.Sprintf("WS dial %d: account unavailable (dead credential/subscription)", statusCode)
 	if trimmed := strings.TrimSpace(cause); trimmed != "" {
-		errorMsg = "WS dial 401: " + trimmed
+		errorMsg = fmt.Sprintf("WS dial %d: %s", statusCode, trimmed)
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 	if err := setAccountDisabledOrError(stateCtx, s.accountRepo, account.ID, errorMsg); err != nil {
-		slog.Warn("openai_ws_dial_401_set_disabled_failed", "account_id", account.ID, "error", err)
+		slog.Warn("openai_ws_dial_account_disable_failed", "account_id", account.ID, "status_code", statusCode, "error", err)
 		return
 	}
-	slog.Warn("openai_ws_dial_401_account_disabled", "account_id", account.ID)
+	slog.Warn("openai_ws_dial_account_disabled", "account_id", account.ID, "status_code", statusCode)
 }
 
 func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until time.Time, reason string) {

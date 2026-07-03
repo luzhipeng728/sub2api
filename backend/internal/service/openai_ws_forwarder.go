@@ -1987,8 +1987,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				// 429 维持原有语义（持久化限额信号 + 走 fallback 响应），不改动。
 				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
 				recordOpenAIWSFailoverOpsEvent(c, account, code, strings.TrimSpace(err.Error()), nil, dialErr.ResponseHeaders)
-			} else if code == http.StatusUnauthorized || code == http.StatusForbidden || code >= 500 {
-				// 账号级 WS 握手失败(401/403/5xx，如 Cloudflare 拒绝握手)：冷却该账号 +
+			} else if code == http.StatusUnauthorized || code == http.StatusPaymentRequired || code == http.StatusForbidden || code >= 500 {
+				// 账号级 WS 握手失败(401/402/403/5xx)：401(token 废)/402(无订阅) 永久禁用死号，
+				// 403(CF 拒绝握手)/5xx 只短冷却；统一冷却该账号 +
 				// 返回 UpstreamFailoverError 让 handler 切换到健康账号，而不是把上游错误直接返回客户端。
 				// 仅在尚未向客户端写出任何字节时才 failover（握手阶段必然未写）。
 				s.handleOpenAIWSDialAccountFailure(ctx, account, code, strings.TrimSpace(err.Error()))
