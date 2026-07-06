@@ -22,53 +22,6 @@ func shouldAutoInjectPromptCacheKeyForCompat(model string) bool {
 	return strings.HasPrefix(normalized, "gpt-5") || strings.Contains(normalized, "codex")
 }
 
-func deriveCompatPromptCacheKey(req *apicompat.ChatCompletionsRequest, mappedModel string) string {
-	if req == nil {
-		return ""
-	}
-
-	normalizedModel := normalizeCodexModel(strings.TrimSpace(mappedModel))
-	if normalizedModel == "" {
-		normalizedModel = normalizeCodexModel(strings.TrimSpace(req.Model))
-	}
-	if normalizedModel == "" {
-		normalizedModel = strings.TrimSpace(req.Model)
-	}
-
-	seedParts := []string{"model=" + normalizedModel}
-	if req.ReasoningEffort != "" {
-		seedParts = append(seedParts, "reasoning_effort="+strings.TrimSpace(req.ReasoningEffort))
-	}
-	if len(req.ToolChoice) > 0 {
-		seedParts = append(seedParts, "tool_choice="+normalizeCompatSeedJSON(req.ToolChoice))
-	}
-	if len(req.Tools) > 0 {
-		if raw, err := json.Marshal(req.Tools); err == nil {
-			seedParts = append(seedParts, "tools="+normalizeCompatSeedJSON(raw))
-		}
-	}
-	if len(req.Functions) > 0 {
-		if raw, err := json.Marshal(req.Functions); err == nil {
-			seedParts = append(seedParts, "functions="+normalizeCompatSeedJSON(raw))
-		}
-	}
-
-	firstUserCaptured := false
-	for _, msg := range req.Messages {
-		switch strings.TrimSpace(msg.Role) {
-		case "system":
-			seedParts = append(seedParts, "system="+normalizeCompatSeedJSON(msg.Content))
-		case "user":
-			if !firstUserCaptured {
-				seedParts = append(seedParts, "first_user="+normalizeCompatSeedJSON(msg.Content))
-				firstUserCaptured = true
-			}
-		}
-	}
-
-	return compatPromptCacheKeyPrefix + hashSensitiveValueForLog(strings.Join(seedParts, "|"))
-}
-
 func deriveAnthropicCompatPromptCacheKey(req *apicompat.AnthropicRequest, mappedModel string) string {
 	if req == nil {
 		return ""

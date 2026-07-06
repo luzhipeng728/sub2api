@@ -78,17 +78,11 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	originalModel := chatReq.Model
 	clientStream := chatReq.Stream
 
-	// 2. Resolve model mapping early so compat prompt_cache_key injection can
-	// derive a stable seed from the final upstream model family.
+	// 2. Resolve model mapping.
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
-	compatPromptCacheInjected := false
-	if promptCacheKey == "" && account.Type == AccountTypeOAuth && shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
-		promptCacheKey = deriveCompatPromptCacheKey(&chatReq, upstreamModel)
-		compatPromptCacheInjected = promptCacheKey != ""
-	}
 
 	// 3. Build the upstream (Responses API) body.
 	//
@@ -159,12 +153,6 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		zap.String("upstream_model", upstreamModel),
 		zap.Bool("stream", clientStream),
 		zap.Bool("responses_shape", isResponsesShape),
-	}
-	if compatPromptCacheInjected {
-		logFields = append(logFields,
-			zap.Bool("compat_prompt_cache_key_injected", true),
-			zap.String("compat_prompt_cache_key_sha256", hashSensitiveValueForLog(promptCacheKey)),
-		)
 	}
 	logger.L().Debug("openai chat_completions: model mapping applied", logFields...)
 
