@@ -2569,7 +2569,76 @@ func (s *adminServiceImpl) GetAccountsByIDs(ctx context.Context, ids []int64) ([
 	return accounts, nil
 }
 
+const (
+	// openAIAutoProvisionConcurrency 新增 OpenAI 账号强制的并发数。
+	openAIAutoProvisionConcurrency = 40
+	// openAIAutoProvisionGroupName 新增 OpenAI 账号自动绑定的分组名。
+	openAIAutoProvisionGroupName = "codex-test"
+)
+
+// pickAutoProvisionProxyID 为新建 OpenAI 账号自动挑一个代理:活跃、未过期、当前挂载账号最少的那个(均摊)。
+// 返回 nil 表示暂无可用代理(此时账号保持无代理)。
+func (s *adminServiceImpl) pickAutoProvisionProxyID(ctx context.Context) *int64 {
+	if s == nil || s.proxyRepo == nil {
+		return nil
+	}
+	proxies, err := s.proxyRepo.ListActiveWithAccountCount(ctx)
+	if err != nil || len(proxies) == 0 {
+		return nil
+	}
+	now := time.Now()
+	var best *ProxyWithAccountCount
+	for i := range proxies {
+		p := &proxies[i]
+		if !p.IsActive() || p.IsExpired(now) {
+			continue
+		}
+		if best == nil || p.AccountCount < best.AccountCount {
+			best = p
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	id := best.ID
+	return &id
+}
+
+// autoProvisionGroupID 查找自动分组(codex-test)的 ID。
+func (s *adminServiceImpl) autoProvisionGroupID(ctx context.Context, platform string) (int64, bool) {
+	if s == nil || s.groupRepo == nil {
+		return 0, false
+	}
+	groups, err := s.groupRepo.ListActiveByPlatform(ctx, platform)
+	if err != nil {
+		return 0, false
+	}
+	for _, g := range groups {
+		if g.Name == openAIAutoProvisionGroupName {
+			return g.ID, true
+		}
+	}
+	return 0, false
+}
+
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	// 新增 OpenAI 账号自动配置:无论走哪条创建/导入路径,都自动
+	//   - 分组: 强制绑定 codex-test(存在时)
+	//   - 并发: 强制 40
+	//   - 代理: 未指定时自动挑一个(活跃且挂载最少)
+	// 目的:导入账号后无需再手动/脚本重置配置。
+	if input != nil && input.Platform == PlatformOpenAI {
+		if gid, ok := s.autoProvisionGroupID(ctx, input.Platform); ok {
+			input.GroupIDs = []int64{gid}
+			input.SkipDefaultGroupBind = true
+			input.SkipMixedChannelCheck = true
+		}
+		input.Concurrency = openAIAutoProvisionConcurrency
+		if input.ProxyID == nil {
+			input.ProxyID = s.pickAutoProvisionProxyID(ctx)
+		}
+	}
+
 	// 绑定分组
 	groupIDs := input.GroupIDs
 	// 如果没有指定分组,自动绑定对应平台的默认分组
