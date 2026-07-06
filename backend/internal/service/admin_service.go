@@ -2571,7 +2571,7 @@ func (s *adminServiceImpl) GetAccountsByIDs(ctx context.Context, ids []int64) ([
 
 const (
 	// openAIAutoProvisionConcurrency 新增 OpenAI 账号强制的并发数。
-	openAIAutoProvisionConcurrency = 40
+	openAIAutoProvisionConcurrency = 60
 	// openAIAutoProvisionGroupName 新增 OpenAI 账号自动绑定的分组名。
 	openAIAutoProvisionGroupName = "codex-test"
 )
