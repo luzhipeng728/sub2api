@@ -141,6 +141,25 @@ func TestHandleOpenAIWSRetryableFallbackExhausted_FailsOverWithoutWriting(t *tes
 	require.Equal(t, 0, rec.Body.Len(), "service must not write a response before handler failover")
 }
 
+func TestHandleOpenAIWSRateLimitedFallback_FailsOverWithoutWriting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 914, Name: "ws-cooled", Platform: PlatformOpenAI}
+	err := wrapOpenAIWSFallback("upstream_rate_limited", errOpenAIWSAccountRuntimeBlocked)
+
+	retErr := svc.handleOpenAIWSRetryableFallbackExhausted(context.Background(), c, account, err)
+
+	var failoverErr *UpstreamFailoverError
+	require.True(t, errors.As(retErr, &failoverErr), "rate-limited WS fallback must ask handler to switch accounts")
+	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "upstream_rate_limited")
+	require.Equal(t, 0, rec.Body.Len(), "service must not expose runtime-blocked errors before handler failover")
+}
+
 func TestHandleOpenAIWSRetryableFallbackExhausted_NonRetryableStaysLocal(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	err := wrapOpenAIWSFallback("policy_violation", errors.New("policy"))

@@ -871,6 +871,35 @@ func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context
 func (s *OpenAIGatewayService) handleOpenAIWSRetryableFallbackExhausted(ctx context.Context, c *gin.Context, account *Account, wsErr error) error {
 	_ = ctx
 	reason, retryable := classifyOpenAIWSReconnectReason(wsErr)
+	baseReason := strings.TrimPrefix(strings.TrimSpace(reason), "prewarm_")
+	if baseReason == "upstream_rate_limited" && (c == nil || c.Writer == nil || !c.Writer.Written()) {
+		body, err := json.Marshal(gin.H{
+			"error": gin.H{
+				"type":    "rate_limit_error",
+				"message": "Upstream rate limit exceeded, please retry later",
+				"reason":  reason,
+			},
+		})
+		if err != nil || len(body) == 0 {
+			body = []byte(`{"error":{"type":"rate_limit_error","message":"Upstream rate limit exceeded, please retry later","reason":"upstream_rate_limited"}}`)
+		}
+		setOpsUpstreamError(c, http.StatusTooManyRequests, "upstream websocket rate limited", string(body))
+		if account != nil {
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: http.StatusTooManyRequests,
+				Kind:               "failover",
+				Message:            "upstream websocket rate limited",
+				Detail:             reason,
+			})
+		}
+		return &UpstreamFailoverError{
+			StatusCode:   http.StatusTooManyRequests,
+			ResponseBody: body,
+		}
+	}
 	if !retryable {
 		return wsErr
 	}
