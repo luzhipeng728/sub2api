@@ -3,13 +3,18 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/redis/go-redis/v9"
 )
 
-const stickySessionPrefix = "sticky_session:"
+const (
+	stickySessionPrefix             = "sticky_session:"
+	openAIAccountRuntimeBlockPrefix = "openai_account_runtime_block:"
+)
 
 type gatewayCache struct {
 	rdb *redis.Client
@@ -51,6 +56,62 @@ func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
 }
+
+func buildOpenAIAccountRuntimeBlockKey(accountID int64) string {
+	return fmt.Sprintf("%s%d", openAIAccountRuntimeBlockPrefix, accountID)
+}
+
+func (c *gatewayCache) SetOpenAIAccountRuntimeBlock(ctx context.Context, accountID int64, until time.Time, ttl time.Duration) error {
+	if c == nil || c.rdb == nil || accountID <= 0 {
+		return nil
+	}
+	if ttl <= 0 || !until.After(time.Now()) {
+		return c.DeleteOpenAIAccountRuntimeBlock(ctx, accountID)
+	}
+	return c.rdb.Set(ctx, buildOpenAIAccountRuntimeBlockKey(accountID), until.UnixNano(), ttl).Err()
+}
+
+func (c *gatewayCache) ListOpenAIAccountRuntimeBlocks(ctx context.Context) (map[int64]time.Time, error) {
+	blocks := make(map[int64]time.Time)
+	if c == nil || c.rdb == nil {
+		return blocks, nil
+	}
+	now := time.Now()
+	iter := c.rdb.Scan(ctx, 0, openAIAccountRuntimeBlockPrefix+"*", 100).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		accountID, err := strconv.ParseInt(strings.TrimPrefix(key, openAIAccountRuntimeBlockPrefix), 10, 64)
+		if err != nil || accountID <= 0 {
+			continue
+		}
+		raw, err := c.rdb.Get(ctx, key).Int64()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		until := time.Unix(0, raw)
+		if !until.After(now) {
+			_ = c.rdb.Del(ctx, key).Err()
+			continue
+		}
+		blocks[accountID] = until
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	return blocks, nil
+}
+
+func (c *gatewayCache) DeleteOpenAIAccountRuntimeBlock(ctx context.Context, accountID int64) error {
+	if c == nil || c.rdb == nil || accountID <= 0 {
+		return nil
+	}
+	return c.rdb.Del(ctx, buildOpenAIAccountRuntimeBlockKey(accountID)).Err()
+}
+
+var _ service.OpenAIAccountRuntimeBlockCache = (*gatewayCache)(nil)
 
 // Compile-time assertion: gatewayCache must implement CyberSessionBlockStore.
 var _ service.CyberSessionBlockStore = (*gatewayCache)(nil)

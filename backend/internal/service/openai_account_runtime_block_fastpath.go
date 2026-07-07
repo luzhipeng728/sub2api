@@ -30,6 +30,14 @@ const (
 	openAIWSDialFailoverCooldown = 60 * time.Second
 )
 
+// OpenAIAccountRuntimeBlockCache is an optional GatewayCache extension used to
+// survive process restarts without probing recently blocked accounts again.
+type OpenAIAccountRuntimeBlockCache interface {
+	SetOpenAIAccountRuntimeBlock(ctx context.Context, accountID int64, until time.Time, ttl time.Duration) error
+	ListOpenAIAccountRuntimeBlocks(ctx context.Context) (map[int64]time.Time, error)
+	DeleteOpenAIAccountRuntimeBlock(ctx context.Context, accountID int64) error
+}
+
 func openAIAccountStateContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	base := context.Background()
 	if ctx != nil {
@@ -250,12 +258,14 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 	}
 
 	shouldEvictIdleWS := false
+	persistUntil := time.Time{}
 	for {
 		current, loaded := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
 		if !loaded {
 			actual, stored := s.openaiAccountRuntimeBlockUntil.LoadOrStore(account.ID, blockUntil)
 			if !stored {
 				shouldEvictIdleWS = true
+				persistUntil = blockUntil
 				break
 			}
 			current = actual
@@ -275,8 +285,12 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 		}
 		if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
 			shouldEvictIdleWS = true
+			persistUntil = blockUntil
 			break
 		}
+	}
+	if !persistUntil.IsZero() {
+		s.persistOpenAIAccountRuntimeBlock(account.ID, persistUntil)
 	}
 	if shouldEvictIdleWS {
 		s.evictOpenAIWSAccountIdleConns(account.ID)
@@ -307,6 +321,7 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 		return
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.deleteOpenAIAccountRuntimeBlock(accountID)
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
@@ -316,6 +331,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	if s.isOpenAIWSProxyRuntimeBlocked(account) {
 		return true
 	}
+	s.hydrateOpenAIAccountRuntimeBlocks()
 	value, ok := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
 	if !ok {
 		return false
@@ -329,7 +345,76 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 		return true
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+	s.deleteOpenAIAccountRuntimeBlock(account.ID)
 	return false
+}
+
+func (s *OpenAIGatewayService) openAIAccountRuntimeBlockCache() OpenAIAccountRuntimeBlockCache {
+	if s == nil || s.cache == nil {
+		return nil
+	}
+	cache, _ := s.cache.(OpenAIAccountRuntimeBlockCache)
+	return cache
+}
+
+func (s *OpenAIGatewayService) hydrateOpenAIAccountRuntimeBlocks() {
+	if s == nil {
+		return
+	}
+	s.openaiAccountRuntimeBlockHydrateOnce.Do(func() {
+		cache := s.openAIAccountRuntimeBlockCache()
+		if cache == nil {
+			return
+		}
+		ctx, cancel := openAIAccountStateContext(context.Background())
+		defer cancel()
+		blocks, err := cache.ListOpenAIAccountRuntimeBlocks(ctx)
+		if err != nil {
+			slog.Warn("openai_runtime_block_hydrate_failed", "error", err)
+			return
+		}
+		now := time.Now()
+		for accountID, until := range blocks {
+			if accountID <= 0 || !until.After(now) {
+				continue
+			}
+			s.openaiAccountRuntimeBlockUntil.Store(accountID, until)
+		}
+	})
+}
+
+func (s *OpenAIGatewayService) persistOpenAIAccountRuntimeBlock(accountID int64, until time.Time) {
+	if s == nil || accountID <= 0 || !until.After(time.Now()) {
+		return
+	}
+	cache := s.openAIAccountRuntimeBlockCache()
+	if cache == nil {
+		return
+	}
+	ttl := time.Until(until)
+	if ttl <= 0 {
+		return
+	}
+	ctx, cancel := openAIAccountStateContext(context.Background())
+	defer cancel()
+	if err := cache.SetOpenAIAccountRuntimeBlock(ctx, accountID, until, ttl); err != nil {
+		slog.Warn("openai_runtime_block_persist_failed", "account_id", accountID, "error", err)
+	}
+}
+
+func (s *OpenAIGatewayService) deleteOpenAIAccountRuntimeBlock(accountID int64) {
+	if s == nil || accountID <= 0 {
+		return
+	}
+	cache := s.openAIAccountRuntimeBlockCache()
+	if cache == nil {
+		return
+	}
+	ctx, cancel := openAIAccountStateContext(context.Background())
+	defer cancel()
+	if err := cache.DeleteOpenAIAccountRuntimeBlock(ctx, accountID); err != nil {
+		slog.Warn("openai_runtime_block_delete_failed", "account_id", accountID, "error", err)
+	}
 }
 
 func (s *OpenAIGatewayService) isOpenAIWSProxyRuntimeBlocked(account *Account) bool {

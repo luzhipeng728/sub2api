@@ -5,12 +5,65 @@ package service
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+type runtimeBlockCacheStub struct {
+	mu       sync.Mutex
+	blocks   map[int64]time.Time
+	setCalls int
+	delCalls int
+}
+
+func (c *runtimeBlockCacheStub) GetSessionAccountID(context.Context, int64, string) (int64, error) {
+	return 0, nil
+}
+
+func (c *runtimeBlockCacheStub) SetSessionAccountID(context.Context, int64, string, int64, time.Duration) error {
+	return nil
+}
+
+func (c *runtimeBlockCacheStub) RefreshSessionTTL(context.Context, int64, string, time.Duration) error {
+	return nil
+}
+
+func (c *runtimeBlockCacheStub) DeleteSessionAccountID(context.Context, int64, string) error {
+	return nil
+}
+
+func (c *runtimeBlockCacheStub) SetOpenAIAccountRuntimeBlock(_ context.Context, accountID int64, until time.Time, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blocks == nil {
+		c.blocks = make(map[int64]time.Time)
+	}
+	c.blocks[accountID] = until
+	c.setCalls++
+	return nil
+}
+
+func (c *runtimeBlockCacheStub) ListOpenAIAccountRuntimeBlocks(context.Context) (map[int64]time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[int64]time.Time, len(c.blocks))
+	for accountID, until := range c.blocks {
+		out[accountID] = until
+	}
+	return out, nil
+}
+
+func (c *runtimeBlockCacheStub) DeleteOpenAIAccountRuntimeBlock(_ context.Context, accountID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.blocks, accountID)
+	c.delCalls++
+	return nil
+}
 
 func TestOpenAI429FastPath_RuntimeSoftBlocksOAuthAccount(t *testing.T) {
 	svc := &OpenAIGatewayService{}
@@ -321,8 +374,33 @@ func TestOpenAIRuntimeBlock_DoesNotShortenExistingBlock(t *testing.T) {
 	require.WithinDuration(t, longUntil, actualUntil, time.Second)
 }
 
+func TestOpenAIRuntimeBlock_PersistsAndHydratesFromCache(t *testing.T) {
+	cache := &runtimeBlockCacheStub{}
+	account := &Account{ID: 57, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	until := time.Now().Add(10 * time.Minute)
+
+	svc := &OpenAIGatewayService{cache: cache}
+	svc.BlockAccountScheduling(account, until, "oauth_429_streak")
+
+	cache.mu.Lock()
+	require.Equal(t, 1, cache.setCalls)
+	persistedUntil := cache.blocks[account.ID]
+	cache.mu.Unlock()
+	require.WithinDuration(t, until, persistedUntil, time.Second)
+
+	freshSvc := &OpenAIGatewayService{cache: cache}
+	require.True(t, freshSvc.isOpenAIAccountRuntimeBlocked(account))
+
+	value, ok := freshSvc.openaiAccountRuntimeBlockUntil.Load(account.ID)
+	require.True(t, ok)
+	hydratedUntil, ok := value.(time.Time)
+	require.True(t, ok)
+	require.WithinDuration(t, until, hydratedUntil, time.Second)
+}
+
 func TestOpenAIRuntimeBlock_ClearAccountSchedulingBlock(t *testing.T) {
-	svc := &OpenAIGatewayService{}
+	cache := &runtimeBlockCacheStub{}
+	svc := &OpenAIGatewayService{cache: cache}
 	account := &Account{ID: 47, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "429")
@@ -330,6 +408,7 @@ func TestOpenAIRuntimeBlock_ClearAccountSchedulingBlock(t *testing.T) {
 
 	svc.ClearAccountSchedulingBlock(account.ID)
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, 1, cache.delCalls)
 }
 
 func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {

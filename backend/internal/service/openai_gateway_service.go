@@ -374,17 +374,18 @@ type OpenAIGatewayService struct {
 	openaiWSPrewarmSessionStore     OpenAIWSPrewarmSessionStore
 	openaiWSPrewarmSessionSetter    OpenAIPrewarmSessionCache
 
-	openaiWSFallbackUntil               sync.Map // key: int64(accountID), value: time.Time
-	openaiAccountRuntimeBlockUntil      sync.Map // key: int64(accountID), value: time.Time
-	openaiOAuth429WindowStartUnixNano   atomic.Int64
-	openaiOAuth429WindowCount           atomic.Int64
-	openaiAccount429Streak              sync.Map // key: int64(accountID), value: *oauth429StreakState
-	openaiAccount429StreakMu            sync.Mutex
-	openaiWSRetryMetrics                openAIWSRetryMetrics
-	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle               *accountWriteThrottle
-	openaiCompatSessionResponses        sync.Map
-	openaiCompatAnthropicDigestSessions sync.Map
+	openaiWSFallbackUntil                sync.Map // key: int64(accountID), value: time.Time
+	openaiAccountRuntimeBlockUntil       sync.Map // key: int64(accountID), value: time.Time
+	openaiAccountRuntimeBlockHydrateOnce sync.Once
+	openaiOAuth429WindowStartUnixNano    atomic.Int64
+	openaiOAuth429WindowCount            atomic.Int64
+	openaiAccount429Streak               sync.Map // key: int64(accountID), value: *oauth429StreakState
+	openaiAccount429StreakMu             sync.Mutex
+	openaiWSRetryMetrics                 openAIWSRetryMetrics
+	responseHeaderFilter                 *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle                *accountWriteThrottle
+	openaiCompatSessionResponses         sync.Map
+	openaiCompatAnthropicDigestSessions  sync.Map
 }
 
 // resolveWSTLSProfile 解析账号的 TLS 指纹 profile,供 WS 握手伪装使用。
