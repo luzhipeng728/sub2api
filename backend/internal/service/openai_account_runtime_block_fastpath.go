@@ -14,7 +14,16 @@ const (
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
-	openAIOAuth429StormMaxAccountSwitches = 40
+	openAIOAuth429StormStopFailedSwitches = 1
+	openAIOAuth429SoftLockMin             = 5 * time.Second
+	openAIOAuth429SoftLockMax             = 60 * time.Second
+	openAIOAuth429SoftLockFullPoolSize    = 100
+	// 账号级连续 429 软锁:两次 429 间隔 <= Gap 视为"连续";累计达 Threshold 次 → 软锁 Lock 时长,
+	// 期间该账号不参与调度(runtime block),让流量集中到仍可用账号。间隔超过 Gap 自动重置计数,
+	// 因此只偶尔 429 的可用账号不会被误锁。
+	openAIOAuth429StreakThreshold = 20
+	openAIOAuth429StreakGap       = 30 * time.Second
+	openAIOAuth429StreakLock      = 20 * time.Minute
 	// openAIWSDialFailoverCooldown: WS 握手返回账号级错误(401/403/5xx)时对该账号的冷却时长。
 	// 让坏账号(如 Cloudflare 拒绝握手 403)被短暂剔除调度并把请求 failover 到健康账号。
 	openAIWSDialFailoverCooldown = 60 * time.Second
@@ -53,8 +62,8 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 			return false
 		}
 	}
-	// prewarm session 启用时，5h/7d 等 429 不作为账号不可调度条件；
-	// 401/403 是账号/边缘权限类错误，继续交给 RateLimitService 做临时不可调度或禁用。
+	// prewarm session 启用时，未被上方 OAuth 429 fast-path 处理的 5h/7d 等 429
+	// 不再交给 RateLimitService 做持久不可调度；401/403 继续按账号/边缘权限类错误处理。
 	if s != nil && s.isOpenAIPrewarmSessionEnabled() {
 		switch statusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
@@ -81,11 +90,110 @@ func (s *OpenAIGatewayService) observeOpenAIOAuth429(ctx context.Context, accoun
 		return
 	}
 	s.recordOpenAIOAuth429()
+	s.softLockOpenAIOAuth429Account(ctx, account)
+	s.bumpOpenAIOAuth429Streak(account)
 	if s.rateLimitService == nil || s.rateLimitService.accountRepo == nil {
 		return
 	}
 	persistOpenAI429PlanType(ctx, s.rateLimitService.accountRepo, account, responseBody)
 	s.rateLimitService.persistOpenAICodexSnapshot(ctx, account, headers)
+}
+
+func openAIOAuth429SoftLockDurationForAvailableAccounts(availableAccounts int) time.Duration {
+	if availableAccounts <= 1 {
+		return openAIOAuth429SoftLockMin
+	}
+	if availableAccounts >= openAIOAuth429SoftLockFullPoolSize {
+		return openAIOAuth429SoftLockMax
+	}
+	span := openAIOAuth429SoftLockMax - openAIOAuth429SoftLockMin
+	stepCount := time.Duration(openAIOAuth429SoftLockFullPoolSize - 1)
+	return openAIOAuth429SoftLockMin + time.Duration(availableAccounts-1)*span/stepCount
+}
+
+func (s *OpenAIGatewayService) softLockOpenAIOAuth429Account(ctx context.Context, account *Account) {
+	if s == nil || !isOpenAIOAuthAccount(account) {
+		return
+	}
+	availableAccounts := s.countOpenAIOAuth429SoftLockAvailableAccounts(ctx, account)
+	duration := openAIOAuth429SoftLockDurationForAvailableAccounts(availableAccounts)
+	s.BlockAccountScheduling(account, time.Now().Add(duration), "oauth_429_soft_lock")
+	logOpenAIWSModeInfo("oauth_429_soft_lock account_id=%d available_accounts=%d lock_sec=%d", account.ID, availableAccounts, int(duration.Seconds()))
+}
+
+func (s *OpenAIGatewayService) countOpenAIOAuth429SoftLockAvailableAccounts(ctx context.Context, account *Account) int {
+	if s == nil || account == nil {
+		return 0
+	}
+	if s.schedulerSnapshot == nil && s.accountRepo == nil {
+		return 0
+	}
+	var groupID *int64
+	if len(account.GroupIDs) > 0 {
+		id := account.GroupIDs[0]
+		groupID = &id
+	}
+	accounts, err := s.listSchedulableAccounts(ctx, groupID)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for i := range accounts {
+		acc := &accounts[i]
+		if !acc.IsOpenAI() || !acc.IsSchedulable() {
+			continue
+		}
+		if s.isOpenAIAccountRuntimeBlocked(acc) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+type oauth429StreakState struct {
+	count  int
+	lastAt time.Time
+}
+
+// bumpOpenAIOAuth429Streak 累计账号连续 429;两次间隔 > Gap 视为断连并重置。
+// 达阈值即对该账号软锁 openAIOAuth429StreakLock,期间不参与调度。
+func (s *OpenAIGatewayService) bumpOpenAIOAuth429Streak(account *Account) {
+	if s == nil || account == nil {
+		return
+	}
+	now := time.Now()
+	v, _ := s.openaiAccount429Streak.LoadOrStore(account.ID, &oauth429StreakState{})
+	st := v.(*oauth429StreakState)
+	s.openaiAccount429StreakMu.Lock()
+	if !st.lastAt.IsZero() && now.Sub(st.lastAt) > openAIOAuth429StreakGap {
+		st.count = 0
+	}
+	st.count++
+	st.lastAt = now
+	shouldLock := st.count >= openAIOAuth429StreakThreshold
+	if shouldLock {
+		st.count = 0
+	}
+	s.openaiAccount429StreakMu.Unlock()
+	if shouldLock {
+		s.BlockAccountScheduling(account, now.Add(openAIOAuth429StreakLock), "oauth_429_streak")
+		logOpenAIWSModeInfo("oauth_429_streak_lock account_id=%d threshold=%d lock_min=%d", account.ID, openAIOAuth429StreakThreshold, int(openAIOAuth429StreakLock.Minutes()))
+	}
+}
+
+// resetOpenAIOAuth429Streak 账号成功产出 → 清零连续 429 计数(打断误锁)。
+func (s *OpenAIGatewayService) resetOpenAIOAuth429Streak(accountID int64) {
+	if s == nil || accountID <= 0 {
+		return
+	}
+	if v, ok := s.openaiAccount429Streak.Load(accountID); ok {
+		st := v.(*oauth429StreakState)
+		s.openaiAccount429StreakMu.Lock()
+		st.count = 0
+		st.lastAt = time.Time{}
+		s.openaiAccount429StreakMu.Unlock()
+	}
 }
 
 func (s *OpenAIGatewayService) handleOpenAIWSDialAccountFailure(ctx context.Context, account *Account, statusCode int, cause string) {
@@ -122,7 +230,8 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 		return
 	}
 	// prewarm session 启用时仍跳过传输类抖动，但保留会影响调度正确性的账号级错误：
-	// - 429 仅统计/记录使用状态，不进入 runtime block，让续接/新锚点持续尝试。
+	// - 单次 429 进入短 runtime soft lock，避免下一次选号继续打刚失败的账号。
+	// - 连续 429 streak 升级为更长 soft lock，避免 429 风暴继续打满 failover。
 	// - 401 使用已有禁用逻辑，坏凭证不会继续抢流量。
 	// - WS 握手 403/5xx 只做短 runtime block，不禁用账号；代理/边缘冷却时避免同账号反复抢流量。
 	if s.isOpenAIPrewarmSessionEnabled() {
@@ -164,7 +273,7 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 
 func isOpenAIPrewarmRuntimeBlockReasonAllowed(reason string) bool {
 	switch reason {
-	case "openai_403_temp", "oauth_401",
+	case "openai_403_temp", "oauth_401", "oauth_429_soft_lock", "oauth_429_streak",
 		"missing_refresh_token", "token_refresh_failed", "token_refresh_non_retryable",
 		"token_refresh_retry_exhausted", "auth_failed", "auth_error", "upstream_disable",
 		"ws_dial_401":
@@ -246,7 +355,7 @@ func (s *OpenAIGatewayService) isOpenAIOAuth429Storm() bool {
 }
 
 func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account, statusCode int, failedSwitches int) bool {
-	if statusCode != http.StatusTooManyRequests || failedSwitches < openAIOAuth429StormMaxAccountSwitches {
+	if statusCode != http.StatusTooManyRequests || failedSwitches < openAIOAuth429StormStopFailedSwitches {
 		return false
 	}
 	if !isOpenAIOAuthAccount(account) {

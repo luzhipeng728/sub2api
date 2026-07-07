@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAI429FastPath_DoesNotRuntimeBlockOAuthAccount(t *testing.T) {
+func TestOpenAI429FastPath_RuntimeSoftBlocksOAuthAccount(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	account := &Account{ID: 42, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKeyAccount := &Account{ID: 43, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
@@ -22,11 +22,11 @@ func TestOpenAI429FastPath_DoesNotRuntimeBlockOAuthAccount(t *testing.T) {
 
 	require.False(t, shouldDisable)
 	require.False(t, apiKeyShouldDisable)
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(apiKeyAccount))
 }
 
-func TestOpenAI429FastPath_PrewarmDoesNotRuntimeBlockOAuthAccount(t *testing.T) {
+func TestOpenAI429FastPath_PrewarmRuntimeSoftBlocksOAuthAccount(t *testing.T) {
 	svc := &OpenAIGatewayService{
 		cfg: &config.Config{
 			Gateway: config.GatewayConfig{
@@ -46,7 +46,40 @@ func TestOpenAI429FastPath_PrewarmDoesNotRuntimeBlockOAuthAccount(t *testing.T) 
 	)
 
 	require.False(t, shouldDisable)
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+func TestOpenAI429SoftLockDuration_MaxesAtSixtySeconds(t *testing.T) {
+	require.Equal(t, 5*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(0))
+	require.Equal(t, 5*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(1))
+	require.Greater(t, openAIOAuth429SoftLockDurationForAvailableAccounts(10), 5*time.Second)
+	require.Equal(t, 60*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(100))
+	require.Equal(t, 60*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(1500))
+}
+
+func TestOpenAI429Streak_PrewarmRuntimeBlocksOAuthAccount(t *testing.T) {
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				OpenAIWS: config.GatewayOpenAIWSConfig{PrewarmSessionEnabled: true},
+			},
+		},
+	}
+	svc.SetOpenAIPrewarmSessionCache(newFakePrewarmSessionCache())
+	account := &Account{ID: 55, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	for i := 0; i < openAIOAuth429StreakThreshold; i++ {
+		shouldDisable := svc.handleOpenAIAccountUpstreamError(
+			context.Background(),
+			account,
+			http.StatusTooManyRequests,
+			http.Header{},
+			[]byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":60}}`),
+		)
+		require.False(t, shouldDisable)
+	}
+
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestOpenAI403FastPath_PrewarmStillTemporarilyBlocksOAuthAccount(t *testing.T) {
@@ -249,11 +282,8 @@ func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {
 		svc.recordOpenAIOAuth429()
 	}
 
-	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 1))
-	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 3))
-	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 39))
-	require.True(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 40))
+	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 0))
+	require.True(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 1))
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusTooManyRequests, 1))
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusInternalServerError, 1))
-	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 0))
 }

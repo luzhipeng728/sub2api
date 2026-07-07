@@ -127,9 +127,8 @@ func TestOpenAIGatewayService_HandleFailoverSideEffects_DoesNotRereadResponseBod
 		svc.handleFailoverSideEffects(context.Background(), resp, account, []byte(`{"error":{"type":"rate_limit_error","message":"rate limited"}}`))
 	})
 
-	// OAuth 账号命中 429 时走 prewarm 续接绕限额：不进入 runtime block，
-	// 账号保留在调度池中（只由 failover 循环换号，不本地冻结）。
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	// OAuth 账号命中 429 后进入短 runtime soft lock，下一次选号会避开刚失败的账号。
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestGetOpenAIRequestBodyMap_IgnoresLegacyContextCache(t *testing.T) {

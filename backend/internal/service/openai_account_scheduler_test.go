@@ -1425,6 +1425,67 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTT
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapesCodexMaxedAccount(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(10103)
+	accounts := []Account{
+		{
+			ID:          21301,
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 1,
+			Priority:    0,
+			GroupIDs:    []int64{groupID},
+			Extra: map[string]any{
+				"codex_5h_used_percent": 96.0,
+			},
+		},
+		{
+			ID:          21302,
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 1,
+			Priority:    1,
+			GroupIDs:    []int64{groupID},
+			Extra: map[string]any{
+				"codex_5h_used_percent": 20.0,
+			},
+		},
+	}
+	cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session_hash_sticky_codex_maxed": 21301}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled = true
+	cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs = 15000
+	cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate = 0.5
+	cfg.Gateway.Scheduling.CodexHeadroomAware = true
+	cfg.Gateway.Scheduling.Codex5hSoftLimit = 95
+	cfg.Gateway.Scheduling.Codex7dSoftLimit = 99
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              cache,
+		cfg:                cfg,
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquireResults: map[int64]bool{21302: true}}),
+		openaiAccountStats: newOpenAIAccountRuntimeStats(),
+	}
+
+	selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "session_hash_sticky_codex_maxed", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(21302), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.False(t, decision.StickySessionHit)
+	require.Equal(t, int64(21301), cache.sessionBindings["openai:session_hash_sticky_codex_maxed"])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByErrorRate(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10102)
@@ -1569,8 +1630,9 @@ func TestDefaultOpenAIAccountScheduler_ShouldEscapeStickyAccount_ThresholdBounda
 	stats.report(accountID, false, nil)
 	stats.report(accountID, true, nil)
 	scheduler := &defaultOpenAIAccountScheduler{stats: stats}
+	account := &Account{ID: accountID}
 
-	reason, errorRate, observedTTFT, shouldEscape := scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+	reason, errorRate, observedTTFT, shouldEscape := scheduler.shouldEscapeStickyAccount(account, openAIStickyEscapeConfig{
 		enabled:   true,
 		ttftMs:    15000,
 		errorRate: 0.5,
@@ -1583,14 +1645,14 @@ func TestDefaultOpenAIAccountScheduler_ShouldEscapeStickyAccount_ThresholdBounda
 	for i := 0; i < 4; i++ {
 		stats.report(accountID, false, nil)
 	}
-	reason, errorRate, _, shouldEscape = scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+	reason, errorRate, _, shouldEscape = scheduler.shouldEscapeStickyAccount(account, openAIStickyEscapeConfig{
 		enabled:   true,
 		ttftMs:    15000,
 		errorRate: 1,
 	})
 	require.False(t, shouldEscape)
 	require.Empty(t, reason)
-	reason, errorRate, observedTTFT, shouldEscape = scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+	reason, errorRate, observedTTFT, shouldEscape = scheduler.shouldEscapeStickyAccount(account, openAIStickyEscapeConfig{
 		enabled:   true,
 		ttftMs:    15000,
 		errorRate: errorRate,

@@ -381,7 +381,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
+	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(account, escapeCfg); shouldEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
 			"reason", reason,
@@ -446,7 +446,17 @@ func openAIStickyAccountMatchesGroup(account *Account, groupID *int64) bool {
 	return false
 }
 
-func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int64, cfg openAIStickyEscapeConfig) (reason string, errorRate float64, ttft float64, shouldEscape bool) {
+func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(account *Account, cfg openAIStickyEscapeConfig) (reason string, errorRate float64, ttft float64, shouldEscape bool) {
+	if !cfg.enabled || s == nil || account == nil || account.ID <= 0 {
+		return "", 0, 0, false
+	}
+	if s.service != nil && s.service.schedulingConfig().CodexHeadroomAware && s.isCodexAccountMaxed(account) {
+		return "codex_headroom", 0, 0, true
+	}
+	return s.shouldEscapeStickyAccountByRuntimeStats(account.ID, cfg)
+}
+
+func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccountByRuntimeStats(accountID int64, cfg openAIStickyEscapeConfig) (reason string, errorRate float64, ttft float64, shouldEscape bool) {
 	if !cfg.enabled || s == nil || s.stats == nil || accountID <= 0 {
 		return "", 0, 0, false
 	}
@@ -1083,7 +1093,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		filtered = append(filtered, account)
 		// 主动熔断预筛：EWMA 未劣化的账号进入 healthy 子集（被动 block 只在真实失败后才生效，
 		// 这里在"撞墙之前"就把高错误率/高首字节的账号预剔除，避免请求被劣化账号拖慢）。
-		if _, _, _, escape := s.shouldEscapeStickyAccount(account.ID, escapeCfg); !escape {
+		if _, _, _, escape := s.shouldEscapeStickyAccountByRuntimeStats(account.ID, escapeCfg); !escape {
 			healthy = append(healthy, account)
 		}
 	}

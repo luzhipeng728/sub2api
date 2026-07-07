@@ -2266,6 +2266,8 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if firstTokenMs == nil && isTokenEvent {
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
+			// 账号成功产出 token → 打断连续 429 计数,避免误锁可用账号。
+			s.resetOpenAIOAuth429Streak(account.ID)
 		}
 		if debugEnabled && shouldLogOpenAIWSEvent(eventCount, eventType) {
 			logOpenAIWSModeDebug(
