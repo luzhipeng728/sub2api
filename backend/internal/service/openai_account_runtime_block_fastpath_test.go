@@ -122,6 +122,42 @@ func TestOpenAIRuntimeBlock_AppliesToOpenAIAPIKeyWhenRateLimitServiceStopsSchedu
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
+func TestOpenAIRuntimeBlock_EvictsIdleWSConnections(t *testing.T) {
+	pool := newOpenAIWSConnPool(&config.Config{})
+	defer pool.Close()
+	svc := &OpenAIGatewayService{openaiWSPool: pool}
+	account := &Account{ID: 47, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	ap := pool.getOrCreateAccountPool(account.ID)
+	idle := newOpenAIWSConn("idle_runtime_block", account.ID, &openAIWSFakeConn{}, nil)
+	leased := newOpenAIWSConn("leased_runtime_block", account.ID, &openAIWSFakeConn{}, nil)
+	require.True(t, leased.tryAcquire())
+	ap.mu.Lock()
+	ap.conns[idle.id] = idle
+	ap.conns[leased.id] = leased
+	ap.mu.Unlock()
+
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "oauth_429_soft_lock")
+
+	select {
+	case <-idle.closedCh:
+	default:
+		t.Fatal("runtime block should evict idle ws connections for the account")
+	}
+
+	ap.mu.Lock()
+	_, idleExists := ap.conns[idle.id]
+	_, leasedExists := ap.conns[leased.id]
+	ap.mu.Unlock()
+	require.False(t, idleExists)
+	require.True(t, leasedExists)
+	select {
+	case <-leased.closedCh:
+		t.Fatal("runtime block should not close an active leased connection")
+	default:
+	}
+}
+
 func TestOpenAIRuntimeBlock_PrewarmKeepsWSDial403(t *testing.T) {
 	svc := &OpenAIGatewayService{
 		cfg: &config.Config{

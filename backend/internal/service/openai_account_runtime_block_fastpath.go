@@ -249,12 +249,14 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 		blockUntil = now.Add(openAIStopSchedulingBridgeCooldown)
 	}
 
+	shouldEvictIdleWS := false
 	for {
 		current, loaded := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
 		if !loaded {
 			actual, stored := s.openaiAccountRuntimeBlockUntil.LoadOrStore(account.ID, blockUntil)
 			if !stored {
-				return
+				shouldEvictIdleWS = true
+				break
 			}
 			current = actual
 		}
@@ -262,17 +264,30 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 		currentUntil, ok := current.(time.Time)
 		if !ok || currentUntil.IsZero() {
 			if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
-				return
+				shouldEvictIdleWS = true
+				break
 			}
 			continue
 		}
 		if currentUntil.After(blockUntil) {
-			return
+			shouldEvictIdleWS = true
+			break
 		}
 		if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
-			return
+			shouldEvictIdleWS = true
+			break
 		}
 	}
+	if shouldEvictIdleWS {
+		s.evictOpenAIWSAccountIdleConns(account.ID)
+	}
+}
+
+func (s *OpenAIGatewayService) evictOpenAIWSAccountIdleConns(accountID int64) {
+	if s == nil || accountID <= 0 || s.openaiWSPool == nil {
+		return
+	}
+	s.openaiWSPool.evictIdleConnsForAccount(accountID)
 }
 
 func isOpenAIPrewarmRuntimeBlockReasonAllowed(reason string) bool {

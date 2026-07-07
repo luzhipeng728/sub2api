@@ -630,6 +630,10 @@ func (p *openAIWSConnPool) setClientDialerForTest(dialer openAIWSClientDialer) {
 	p.clientDialer = dialer
 }
 
+func (p *openAIWSConnPool) isAccountRuntimeBlocked(account *Account) bool {
+	return p != nil && p.runtimeBlocked != nil && p.runtimeBlocked(account)
+}
+
 // Close 停止后台 worker 并关闭所有空闲连接，应在优雅关闭时调用。
 func (p *openAIWSConnPool) Close() {
 	if p == nil {
@@ -807,7 +811,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	if stringsTrim(req.WSURL) == "" {
 		return nil, errors.New("ws url is empty")
 	}
-	if p.runtimeBlocked != nil && p.runtimeBlocked(req.Account) {
+	if p.isAccountRuntimeBlocked(req.Account) {
 		return nil, errOpenAIWSAccountRuntimeBlocked
 	}
 
@@ -1321,6 +1325,9 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	if ap.prewarmActive {
 		return
 	}
+	if p.isAccountRuntimeBlocked(ap.lastAcquire.Account) {
+		return
+	}
 	now := time.Now()
 	if !ap.prewarmUntil.IsZero() && now.Before(ap.prewarmUntil) {
 		return
@@ -1415,6 +1422,9 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 	}()
 
 	for i := 0; i < total; i++ {
+		if p.isAccountRuntimeBlocked(req.Account) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
 		conn, err := p.dialConn(ctx, req)
 		cancel()
@@ -1436,6 +1446,11 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 			ap.prewarmFailAt = time.Now()
 			ap.mu.Unlock()
 			continue
+		}
+		if p.isAccountRuntimeBlocked(req.Account) {
+			ap.mu.Unlock()
+			conn.close()
+			return
 		}
 		if len(ap.conns) >= p.effectiveMaxConnsByAccount(req.Account) {
 			ap.mu.Unlock()
@@ -1469,6 +1484,41 @@ func (p *openAIWSConnPool) evictConn(accountID int64, connID string) {
 	if conn != nil {
 		conn.close()
 	}
+}
+
+func (p *openAIWSConnPool) evictIdleConnsForAccount(accountID int64) int {
+	if p == nil || accountID <= 0 {
+		return 0
+	}
+	ap, ok := p.getAccountPool(accountID)
+	if !ok || ap == nil {
+		return 0
+	}
+	evicted := make([]*openAIWSConn, 0)
+	ap.mu.Lock()
+	for id, conn := range ap.conns {
+		if conn == nil {
+			delete(ap.conns, id)
+			if len(ap.pinnedConns) > 0 {
+				delete(ap.pinnedConns, id)
+			}
+			continue
+		}
+		if conn.isLeased() || conn.waiters.Load() > 0 || p.isConnPinnedLocked(ap, id) {
+			continue
+		}
+		delete(ap.conns, id)
+		if len(ap.pinnedConns) > 0 {
+			delete(ap.pinnedConns, id)
+		}
+		evicted = append(evicted, conn)
+	}
+	ap.mu.Unlock()
+	closeOpenAIWSConns(evicted)
+	if len(evicted) > 0 {
+		p.metrics.scaleDownTotal.Add(int64(len(evicted)))
+	}
+	return len(evicted)
 }
 
 func (p *openAIWSConnPool) PinConn(accountID int64, connID string) bool {

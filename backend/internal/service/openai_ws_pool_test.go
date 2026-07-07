@@ -218,6 +218,85 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncCooldown(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+func TestOpenAIWSConnPool_EnsureTargetIdleAsyncSkipsRuntimeBlockedAccount(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 4
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+	cfg.Gateway.OpenAIWS.PoolTargetUtilization = 0.8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 1
+
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+
+	accountID := int64(21002)
+	account := &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	pool.runtimeBlocked = func(candidate *Account) bool {
+		return candidate != nil && candidate.ID == account.ID
+	}
+
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+
+	pool.ensureTargetIdleAsync(accountID)
+	time.Sleep(100 * time.Millisecond)
+
+	require.Zero(t, dialer.DialCount())
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Empty(t, ap.conns)
+	require.Zero(t, ap.creating)
+	require.False(t, ap.prewarmActive)
+}
+
+func TestOpenAIWSConnPool_PrewarmStopsWhenAccountBecomesRuntimeBlocked(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 4
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 1
+
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+
+	var blocked atomic.Bool
+	accountID := int64(21003)
+	account := &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	pool.runtimeBlocked = func(candidate *Account) bool {
+		return candidate != nil && candidate.ID == account.ID && blocked.Load()
+	}
+	dialer := &openAIWSHookDialer{
+		onDial: func(count int) {
+			if count == 1 {
+				blocked.Store(true)
+			}
+		},
+	}
+	pool.setClientDialerForTest(dialer)
+
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.prewarmActive = true
+	ap.creating = 3
+	ap.mu.Unlock()
+
+	pool.prewarmConns(accountID, openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+	}, 3)
+
+	require.Equal(t, 1, dialer.DialCount())
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Empty(t, ap.conns)
+	require.Zero(t, ap.creating)
+	require.False(t, ap.prewarmActive)
+}
+
 func TestOpenAIWSConnPool_EnsureTargetIdleAsyncFailureSuppress(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
@@ -1456,6 +1535,12 @@ type openAIWSCountingDialer struct {
 	dialCount int
 }
 
+type openAIWSHookDialer struct {
+	mu        sync.Mutex
+	dialCount int
+	onDial    func(count int)
+}
+
 type openAIWSAlwaysFailDialer struct {
 	mu        sync.Mutex
 	dialCount int
@@ -1519,6 +1604,34 @@ func (d *openAIWSCountingDialer) Dial(
 }
 
 func (d *openAIWSCountingDialer) DialCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dialCount
+}
+
+func (d *openAIWSHookDialer) Dial(
+	ctx context.Context,
+	wsURL string,
+	headers http.Header,
+	proxyURL string,
+	_ *tlsfingerprint.Profile,
+) (openAIWSClientConn, int, http.Header, error) {
+	_ = ctx
+	_ = wsURL
+	_ = headers
+	_ = proxyURL
+	d.mu.Lock()
+	d.dialCount++
+	count := d.dialCount
+	onDial := d.onDial
+	d.mu.Unlock()
+	if onDial != nil {
+		onDial(count)
+	}
+	return &openAIWSFakeConn{}, 0, nil, nil
+}
+
+func (d *openAIWSHookDialer) DialCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.dialCount
