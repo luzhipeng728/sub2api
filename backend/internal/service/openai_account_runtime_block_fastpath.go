@@ -19,11 +19,11 @@ const (
 	openAIOAuth429SoftLockMax             = 60 * time.Second
 	openAIOAuth429SoftLockMidPoolSize     = 500
 	openAIOAuth429SoftLockFullPoolSize    = 1000
-	// 账号级连续 429 软锁:两次 429 间隔 <= Gap 视为"连续";累计达 Threshold 次 → 软锁 Lock 时长,
-	// 期间该账号不参与调度(runtime block),让流量集中到仍可用账号。间隔超过 Gap 自动重置计数,
-	// 因此只偶尔 429 的可用账号不会被误锁。
-	openAIOAuth429StreakThreshold = 20
-	openAIOAuth429StreakGap       = 30 * time.Second
+	// 账号级重复 429 升级锁:单次 429 先按可用池规模短软锁(最多 60s);同账号跨短锁仍重复 429,
+	// 说明它大概率已到真实 5h/7d usage limit。累计达 Threshold 次 → 软锁 Lock 时长,
+	// 期间该账号不参与调度(runtime block),让流量集中到仍可用账号。
+	openAIOAuth429StreakThreshold = 3
+	openAIOAuth429StreakGap       = 5 * time.Minute
 	openAIOAuth429StreakLock      = 20 * time.Minute
 	// openAIWSDialFailoverCooldown: WS 握手返回账号级错误(401/403/5xx)时对该账号的冷却时长。
 	// 让坏账号(如 Cloudflare 拒绝握手 403)被短暂剔除调度并把请求 failover 到健康账号。

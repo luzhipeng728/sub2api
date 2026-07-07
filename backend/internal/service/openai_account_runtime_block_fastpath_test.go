@@ -84,6 +84,29 @@ func TestOpenAI429Streak_PrewarmRuntimeBlocksOAuthAccount(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
+func TestOpenAI429Streak_AccumulatesAcrossSoftLockCooldown(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 56, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	svc.openaiAccount429Streak.Store(account.ID, &oauth429StreakState{
+		count:  openAIOAuth429StreakThreshold - 1,
+		lastAt: time.Now().Add(-openAIOAuth429SoftLockMax - 5*time.Second),
+	})
+
+	svc.handleOpenAIAccountUpstreamError(
+		context.Background(),
+		account,
+		http.StatusTooManyRequests,
+		http.Header{},
+		[]byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`),
+	)
+
+	value, ok := svc.openaiAccountRuntimeBlockUntil.Load(account.ID)
+	require.True(t, ok)
+	until, ok := value.(time.Time)
+	require.True(t, ok)
+	require.GreaterOrEqual(t, time.Until(until), openAIOAuth429StreakLock-time.Second)
+}
+
 func TestOpenAI403FastPath_PrewarmStillTemporarilyBlocksOAuthAccount(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
 	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
