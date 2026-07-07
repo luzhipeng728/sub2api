@@ -35,6 +35,7 @@ var (
 	errOpenAIWSConnClosed               = errors.New("openai ws connection closed")
 	errOpenAIWSConnQueueFull            = errors.New("openai ws connection queue full")
 	errOpenAIWSPreferredConnUnavailable = errors.New("openai ws preferred connection unavailable")
+	errOpenAIWSAccountRuntimeBlocked    = errors.New("openai ws account runtime blocked")
 )
 
 type openAIWSDialError struct {
@@ -556,6 +557,8 @@ type openAIWSConnPool struct {
 	cfg *config.Config
 	// 通过接口解耦底层 WS 客户端实现，默认使用 coder/websocket。
 	clientDialer openAIWSClientDialer
+	// runtimeBlocked 由服务层注入；账号进入短软锁/熔断时，连接池不再为其复用或预热连接。
+	runtimeBlocked func(*Account) bool
 
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
@@ -568,6 +571,13 @@ type openAIWSConnPool struct {
 	// CF 403 封 IP 后,重试雪崩会把 CF 越打越死;熔断后该代理的新握手直接 fail-fast(不再打 CF),
 	// 给 IP 冷却机会,并打断"403→重试→更多403"的雪崩。
 	proxyBreakers sync.Map
+
+	// 全局 egress 握手熔断:汇总所有代理的握手 403;窗口内超阈值即判定 CF 整体封出口,
+	// 对所有新握手 fail-fast。单代理熔断只能防"个别坏代理",防不住"全体被封"的雪崩。
+	globalBreakerMu        sync.Mutex
+	global403Count         int
+	global403WindowStart   time.Time
+	globalBreakerOpenUntil time.Time
 
 	metrics openAIWSPoolMetrics
 
@@ -796,6 +806,9 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	}
 	if stringsTrim(req.WSURL) == "" {
 		return nil, errors.New("ws url is empty")
+	}
+	if p.runtimeBlocked != nil && p.runtimeBlocked(req.Account) {
+		return nil, errOpenAIWSAccountRuntimeBlocked
 	}
 
 	accountID := req.Account.ID
@@ -1537,6 +1550,16 @@ const (
 	openAIWSProxy403Cooldown  = 45 * time.Second
 )
 
+// 全局 egress 握手熔断参数:汇总所有代理的握手 403;窗口内超阈值即判定 Cloudflare
+// 对整个出口整体封禁。此时单代理熔断因流量分散到上千代理各自达不到阈值而失效,
+// 故用全局闸对所有新握手 fail-fast,彻底打断"全体 403 → 重试雪崩 → 连接/内存风暴"。
+// 冷却期结束自然放行探测;任一握手成功即解除(egress 恢复)。
+const (
+	openAIWSGlobal403Window    = 5 * time.Second
+	openAIWSGlobal403Threshold = 40
+	openAIWSGlobal403Cooldown  = 20 * time.Second
+)
+
 type proxyHandshakeBreaker struct {
 	mu          sync.Mutex
 	failCount   int
@@ -1603,9 +1626,54 @@ func (p *openAIWSConnPool) resetProxyHandshakeBreaker(proxyURL string) {
 	}
 }
 
+// globalBreakerOpen 判断全局 egress 握手熔断是否处于冷却期(期间所有新握手直接 fail-fast)。
+func (p *openAIWSConnPool) globalBreakerOpen() bool {
+	p.globalBreakerMu.Lock()
+	defer p.globalBreakerMu.Unlock()
+	return time.Now().Before(p.globalBreakerOpenUntil)
+}
+
+// recordGlobalHandshake403 汇总所有代理的握手 403;窗口内超阈值 → 开启全局熔断冷却。
+func (p *openAIWSConnPool) recordGlobalHandshake403() {
+	now := time.Now()
+	p.globalBreakerMu.Lock()
+	defer p.globalBreakerMu.Unlock()
+	if now.Before(p.globalBreakerOpenUntil) {
+		return
+	}
+	if p.global403WindowStart.IsZero() || now.Sub(p.global403WindowStart) > openAIWSGlobal403Window {
+		p.global403WindowStart = now
+		p.global403Count = 0
+	}
+	p.global403Count++
+	if p.global403Count >= openAIWSGlobal403Threshold {
+		p.globalBreakerOpenUntil = now.Add(openAIWSGlobal403Cooldown)
+		p.global403Count = 0
+		p.global403WindowStart = time.Time{}
+		logOpenAIWSModeInfo("global_handshake_breaker_open cooldown_s=%d reason=cloudflare_egress_wide_403", int(openAIWSGlobal403Cooldown.Seconds()))
+	}
+}
+
+// resetGlobalBreaker 任一握手成功 → 解除全局熔断(egress 已恢复)。
+func (p *openAIWSConnPool) resetGlobalBreaker() {
+	p.globalBreakerMu.Lock()
+	defer p.globalBreakerMu.Unlock()
+	if p.global403Count == 0 && p.global403WindowStart.IsZero() && p.globalBreakerOpenUntil.IsZero() {
+		return
+	}
+	p.global403Count = 0
+	p.global403WindowStart = time.Time{}
+	p.globalBreakerOpenUntil = time.Time{}
+}
+
 func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConn, error) {
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
+	}
+	// 全局 egress 熔断:CF 已对整个出口封锁 → 所有新握手直接 fail-fast(不再打 CF、不排握手槽),
+	// 防"全体代理被封"雪崩的总闸;单代理熔断在流量分散到上千代理时无法触发。
+	if p.globalBreakerOpen() {
+		return nil, &openAIWSDialError{StatusCode: http.StatusForbidden, Err: errors.New("global egress handshake circuit open (cloudflare egress-wide 403 cooldown)")}
 	}
 	// 熔断:该代理正处于 CF 403 冷却期 → 直接 fail-fast,不再打 CF(打断"403→重试→更多403"雪崩)。
 	if p.proxyBreakerOpen(req.ProxyURL) {
@@ -1621,6 +1689,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	if err != nil {
 		if status == http.StatusForbidden {
 			p.recordProxyHandshake403(req.ProxyURL)
+			p.recordGlobalHandshake403()
 		}
 		return nil, &openAIWSDialError{
 			StatusCode:      status,
@@ -1635,8 +1704,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			Err:             errors.New("openai ws dialer returned nil connection"),
 		}
 	}
-	// 握手成功 → 清零该代理熔断计数(CF 已放行)。
+	// 握手成功 → 清零该代理熔断计数 + 解除全局熔断(CF 已放行,egress 恢复)。
 	p.resetProxyHandshakeBreaker(req.ProxyURL)
+	p.resetGlobalBreaker()
 	id := p.nextConnID(req.Account.ID)
 	return newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders), nil
 }

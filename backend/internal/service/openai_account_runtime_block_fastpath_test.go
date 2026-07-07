@@ -49,11 +49,13 @@ func TestOpenAI429FastPath_PrewarmRuntimeSoftBlocksOAuthAccount(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
-func TestOpenAI429SoftLockDuration_MaxesAtSixtySeconds(t *testing.T) {
-	require.Equal(t, 5*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(0))
-	require.Equal(t, 5*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(1))
-	require.Greater(t, openAIOAuth429SoftLockDurationForAvailableAccounts(10), 5*time.Second)
-	require.Equal(t, 60*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(100))
+func TestOpenAI429SoftLockDuration_ScalesWithAvailableAccounts(t *testing.T) {
+	require.Equal(t, 10*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(0))
+	require.Equal(t, 10*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(100))
+	require.Equal(t, 15*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(200))
+	require.Equal(t, 30*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(500))
+	require.Equal(t, 45*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(750))
+	require.Equal(t, 60*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(1000))
 	require.Equal(t, 60*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(1500))
 }
 

@@ -15,9 +15,10 @@ const (
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormStopFailedSwitches = 1
-	openAIOAuth429SoftLockMin             = 5 * time.Second
+	openAIOAuth429SoftLockMin             = 10 * time.Second
 	openAIOAuth429SoftLockMax             = 60 * time.Second
-	openAIOAuth429SoftLockFullPoolSize    = 100
+	openAIOAuth429SoftLockMidPoolSize     = 500
+	openAIOAuth429SoftLockFullPoolSize    = 1000
 	// 账号级连续 429 软锁:两次 429 间隔 <= Gap 视为"连续";累计达 Threshold 次 → 软锁 Lock 时长,
 	// 期间该账号不参与调度(runtime block),让流量集中到仍可用账号。间隔超过 Gap 自动重置计数,
 	// 因此只偶尔 429 的可用账号不会被误锁。
@@ -100,15 +101,18 @@ func (s *OpenAIGatewayService) observeOpenAIOAuth429(ctx context.Context, accoun
 }
 
 func openAIOAuth429SoftLockDurationForAvailableAccounts(availableAccounts int) time.Duration {
-	if availableAccounts <= 1 {
+	if availableAccounts <= 100 {
 		return openAIOAuth429SoftLockMin
 	}
 	if availableAccounts >= openAIOAuth429SoftLockFullPoolSize {
 		return openAIOAuth429SoftLockMax
 	}
-	span := openAIOAuth429SoftLockMax - openAIOAuth429SoftLockMin
-	stepCount := time.Duration(openAIOAuth429SoftLockFullPoolSize - 1)
-	return openAIOAuth429SoftLockMin + time.Duration(availableAccounts-1)*span/stepCount
+	if availableAccounts <= openAIOAuth429SoftLockMidPoolSize {
+		span := 30*time.Second - openAIOAuth429SoftLockMin
+		return openAIOAuth429SoftLockMin + time.Duration(availableAccounts-100)*span/time.Duration(openAIOAuth429SoftLockMidPoolSize-100)
+	}
+	span := openAIOAuth429SoftLockMax - 30*time.Second
+	return 30*time.Second + time.Duration(availableAccounts-openAIOAuth429SoftLockMidPoolSize)*span/time.Duration(openAIOAuth429SoftLockFullPoolSize-openAIOAuth429SoftLockMidPoolSize)
 }
 
 func (s *OpenAIGatewayService) softLockOpenAIOAuth429Account(ctx context.Context, account *Account) {

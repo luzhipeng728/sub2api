@@ -1415,6 +1415,26 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 	require.ErrorIs(t, err, errOpenAIWSConnQueueFull)
 }
 
+func TestOpenAIWSConnPool_AcquireSkipsRuntimeBlockedAccount(t *testing.T) {
+	cfg := &config.Config{}
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 21001, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	pool.runtimeBlocked = func(candidate *Account) bool {
+		return candidate != nil && candidate.ID == account.ID
+	}
+
+	_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+	})
+
+	require.ErrorIs(t, err, errOpenAIWSAccountRuntimeBlocked)
+	require.Equal(t, "upstream_rate_limited", classifyOpenAIWSAcquireError(err))
+	require.Zero(t, dialer.DialCount())
+}
+
 type openAIWSFakeDialer struct{}
 
 func (d *openAIWSFakeDialer) Dial(

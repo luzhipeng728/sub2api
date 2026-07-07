@@ -934,6 +934,7 @@ func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {
 	s.openaiWSPoolOnce.Do(func() {
 		if s.openaiWSPool == nil {
 			s.openaiWSPool = newOpenAIWSConnPool(s.cfg)
+			s.openaiWSPool.runtimeBlocked = s.isOpenAIAccountRuntimeBlocked
 		}
 	})
 	return s.openaiWSPool
@@ -4532,6 +4533,9 @@ func classifyOpenAIWSAcquireError(err error) string {
 	}
 	if errors.Is(err, errOpenAIWSPreferredConnUnavailable) {
 		return "preferred_conn_unavailable"
+	}
+	if errors.Is(err, errOpenAIWSAccountRuntimeBlocked) {
+		return "upstream_rate_limited"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "acquire_timeout"
