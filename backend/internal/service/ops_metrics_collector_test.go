@@ -58,3 +58,43 @@ func TestOpsMetricsCollectorQueryErrorCountsExcludesCountTokens(t *testing.T) {
 	require.NoError(t, db.Close())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// wsPoolSnapshotStub lets the collector test avoid spinning up a real
+// OpenAIGatewayService / WS pool.
+type wsPoolSnapshotStub struct {
+	snapshot OpenAIWSPoolMetricsSnapshot
+}
+
+func (s *wsPoolSnapshotStub) SnapshotOpenAIWSPoolMetrics() OpenAIWSPoolMetricsSnapshot {
+	return s.snapshot
+}
+
+func TestOpsMetricsCollectorIncludesRuntimeAndWSStats(t *testing.T) {
+	c := &OpsMetricsCollector{
+		wsPoolMetrics: &wsPoolSnapshotStub{
+			snapshot: OpenAIWSPoolMetricsSnapshot{
+				AcquireCreateTotal: 500,
+				ActiveConnCount:    12,
+			},
+		},
+	}
+
+	heapAllocMB, heapSysMB, gcCount := c.collectRuntimeMemStats()
+	if heapAllocMB == nil || *heapAllocMB <= 0 {
+		t.Fatalf("expected positive heapAllocMB, got %v", heapAllocMB)
+	}
+	if heapSysMB == nil || *heapSysMB <= 0 {
+		t.Fatalf("expected positive heapSysMB, got %v", heapSysMB)
+	}
+	if gcCount == nil {
+		t.Fatalf("expected non-nil gcCount")
+	}
+
+	wsActive, wsHandshakeTotal := c.collectWSPoolStats()
+	if wsActive == nil || *wsActive != 12 {
+		t.Fatalf("wsActive = %v, want 12", wsActive)
+	}
+	if wsHandshakeTotal == nil || *wsHandshakeTotal != 500 {
+		t.Fatalf("wsHandshakeTotal = %v, want 500", wsHandshakeTotal)
+	}
+}

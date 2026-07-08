@@ -287,11 +287,12 @@ func ProvideOpsMetricsCollector(
 	settingRepo SettingRepository,
 	accountRepo AccountRepository,
 	concurrencyService *ConcurrencyService,
+	openAIGatewayService *OpenAIGatewayService,
 	db *sql.DB,
 	redisClient *redis.Client,
 	cfg *config.Config,
 ) *OpsMetricsCollector {
-	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, cfg)
+	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, openAIGatewayService, db, redisClient, cfg)
 	collector.Start()
 	return collector
 }

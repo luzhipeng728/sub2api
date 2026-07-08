@@ -22,6 +22,13 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
+// openAIWSPoolMetricsProvider is the minimal surface OpsMetricsCollector
+// needs from OpenAIGatewayService, kept narrow so tests can stub it without
+// constructing the full gateway service.
+type openAIWSPoolMetricsProvider interface {
+	SnapshotOpenAIWSPoolMetrics() OpenAIWSPoolMetricsSnapshot
+}
+
 const (
 	opsMetricsCollectorJobName     = "ops_metrics_collector"
 	opsMetricsCollectorMinInterval = 60 * time.Second
@@ -46,6 +53,7 @@ type OpsMetricsCollector struct {
 
 	accountRepo        AccountRepository
 	concurrencyService *ConcurrencyService
+	wsPoolMetrics      openAIWSPoolMetricsProvider
 
 	db          *sql.DB
 	redisClient *redis.Client
@@ -67,6 +75,7 @@ func NewOpsMetricsCollector(
 	settingRepo SettingRepository,
 	accountRepo AccountRepository,
 	concurrencyService *ConcurrencyService,
+	wsPoolMetrics openAIWSPoolMetricsProvider,
 	db *sql.DB,
 	redisClient *redis.Client,
 	cfg *config.Config,
@@ -77,6 +86,7 @@ func NewOpsMetricsCollector(
 		cfg:                cfg,
 		accountRepo:        accountRepo,
 		concurrencyService: concurrencyService,
+		wsPoolMetrics:      wsPoolMetrics,
 		db:                 db,
 		redisClient:        redisClient,
 		instanceID:         uuid.NewString(),
@@ -300,6 +310,8 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 
 	goroutines := runtime.NumGoroutine()
 	concurrencyQueueDepth := c.collectConcurrencyQueueDepth(ctx)
+	heapAllocMB, heapSysMB, gcCount := c.collectRuntimeMemStats()
+	wsActiveConns, wsHandshakeTotal := c.collectWSPoolStats()
 
 	input := &OpsInsertSystemMetricsInput{
 		CreatedAt:     windowEnd,
@@ -358,9 +370,39 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 		DBConnIdle:            intPtr(idle),
 		GoroutineCount:        intPtr(goroutines),
 		ConcurrencyQueueDepth: concurrencyQueueDepth,
+
+		HeapAllocMB: heapAllocMB,
+		HeapSysMB:   heapSysMB,
+		GCCount:     gcCount,
+
+		WSActiveConns:    wsActiveConns,
+		WSHandshakeTotal: wsHandshakeTotal,
 	}
 
 	return c.opsRepo.InsertSystemMetrics(ctx, input)
+}
+
+// collectRuntimeMemStats reads Go's heap stats. Cheap (no STW beyond what
+// ReadMemStats itself does) and safe to call every collector tick (60s+).
+func (c *OpsMetricsCollector) collectRuntimeMemStats() (heapAllocMB, heapSysMB *int64, gcCount *int) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	alloc := int64(m.HeapAlloc / bytesPerMB)
+	sys := int64(m.HeapSys / bytesPerMB)
+	gc := int(m.NumGC)
+	return &alloc, &sys, &gc
+}
+
+// collectWSPoolStats reads the OpenAI WS connection pool's live snapshot.
+// Returns (nil, nil) if no provider was wired (e.g. in tests that don't set it).
+func (c *OpsMetricsCollector) collectWSPoolStats() (wsActiveConns *int, wsHandshakeTotal *int64) {
+	if c == nil || c.wsPoolMetrics == nil {
+		return nil, nil
+	}
+	snap := c.wsPoolMetrics.SnapshotOpenAIWSPoolMetrics()
+	active := int(snap.ActiveConnCount)
+	total := snap.AcquireCreateTotal
+	return &active, &total
 }
 
 func (c *OpsMetricsCollector) collectConcurrencyQueueDepth(parentCtx context.Context) *int {
