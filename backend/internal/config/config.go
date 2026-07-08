@@ -91,6 +91,7 @@ type Config struct {
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
+	Vistara                 VistaraConfig                 `mapstructure:"vistara"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 }
@@ -136,6 +137,16 @@ type GeminiOAuthConfig struct {
 	ClientID     string `mapstructure:"client_id"`
 	ClientSecret string `mapstructure:"client_secret"`
 	Scopes       string `mapstructure:"scopes"`
+}
+
+type VistaraConfig struct {
+	// BaseURL is the vistara channel-list API, e.g.
+	// https://openai.vistara.work/api/channel/?p=1&page_size=100&id_sort=true&tag_mode=false
+	BaseURL string `mapstructure:"base_url"`
+	// APIToken authenticates against the vistara admin API (Bearer token).
+	APIToken string `mapstructure:"api_token"`
+	// ChannelID is the downstream channel to track cumulative used_quota for.
+	ChannelID int64 `mapstructure:"channel_id"`
 }
 
 type GeminiQuotaConfig struct {
@@ -2026,6 +2037,10 @@ func setDefaults() {
 	viper.SetDefault("gemini.oauth.client_secret", "")
 	viper.SetDefault("gemini.oauth.scopes", "")
 	viper.SetDefault("gemini.quota.policy", "")
+
+	viper.SetDefault("vistara.base_url", "")
+	viper.SetDefault("vistara.api_token", "")
+	viper.SetDefault("vistara.channel_id", int64(0))
 
 	// Subscription Maintenance (bounded queue + worker pool)
 	viper.SetDefault("subscription_maintenance.worker_count", 2)
