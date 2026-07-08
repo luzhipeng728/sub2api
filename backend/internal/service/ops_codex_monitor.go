@@ -77,13 +77,11 @@ func (s *OpsService) GetCodexOverview(ctx context.Context, since, until time.Tim
 	}
 	out.TotalTraffic = out.SuccessCount + out.BlockedCount
 
-	// RPM1h is the success rate extrapolated to a standard 1-hour window
-	// (i.e. "how many requests would land in an hour at this rate"), not a
-	// literal per-minute rate — a window shorter/longer than 1h is scaled
-	// accordingly (windowMinutes=60 => RPM1h == SuccessCount).
+	// RPM1h is the genuine requests-per-minute rate over the [since, until)
+	// window: successful requests divided by the window length in minutes.
 	windowMinutes := until.Sub(since).Minutes()
 	if windowMinutes > 0 {
-		out.RPM1h = float64(out.SuccessCount) / windowMinutes * 60
+		out.RPM1h = float64(out.SuccessCount) / windowMinutes
 	}
 
 	return out, nil

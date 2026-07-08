@@ -50,7 +50,7 @@ func TestOpsServiceGetCodexOverviewAggregatesAcrossAccounts(t *testing.T) {
 	if overview.AccountsUsed != 2 {
 		t.Fatalf("AccountsUsed = %d, want 2", overview.AccountsUsed)
 	}
-	if overview.RPM1h != 150 {
-		t.Fatalf("RPM1h = %.2f, want 150", overview.RPM1h)
+	if overview.RPM1h != 2.5 {
+		t.Fatalf("RPM1h = %.2f, want 2.5", overview.RPM1h)
 	}
 }
