@@ -34,6 +34,7 @@ type OpsRepository interface {
 
 	InsertSystemMetrics(ctx context.Context, input *OpsInsertSystemMetricsInput) error
 	GetLatestSystemMetrics(ctx context.Context, windowMinutes int) (*OpsSystemMetricsSnapshot, error)
+	ListSystemMetricsSince(ctx context.Context, since time.Time) ([]*OpsSystemMetricsSnapshot, error)
 
 	UpsertJobHeartbeat(ctx context.Context, input *OpsUpsertJobHeartbeatInput) error
 	ListJobHeartbeats(ctx context.Context) ([]*OpsJobHeartbeat, error)
@@ -190,6 +191,17 @@ type OpsInsertSystemMetricsInput struct {
 
 	GoroutineCount        *int
 	ConcurrencyQueueDepth *int
+
+	// Go runtime heap stats (from runtime.ReadMemStats), collected alongside
+	// the existing cgroup/host memory_used_mb for attribution.
+	HeapAllocMB *int64
+	HeapSysMB   *int64
+	GCCount     *int
+
+	// OpenAI WS connection pool snapshot, for correlating memory growth with
+	// connection leaks.
+	WSActiveConns    *int
+	WSHandshakeTotal *int64
 }
 
 type OpsInsertSystemLogInput struct {
@@ -282,6 +294,13 @@ type OpsSystemMetricsSnapshot struct {
 	GoroutineCount        *int   `json:"goroutine_count"`
 	ConcurrencyQueueDepth *int   `json:"concurrency_queue_depth"`
 	AccountSwitchCount    *int64 `json:"account_switch_count"`
+
+	HeapAllocMB *int64 `json:"heap_alloc_mb"`
+	HeapSysMB   *int64 `json:"heap_sys_mb"`
+	GCCount     *int   `json:"gc_count"`
+
+	WSActiveConns    *int   `json:"ws_active_conns"`
+	WSHandshakeTotal *int64 `json:"ws_handshake_total"`
 }
 
 type OpsUpsertJobHeartbeatInput struct {

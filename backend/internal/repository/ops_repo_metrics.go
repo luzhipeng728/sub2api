@@ -77,7 +77,13 @@ INSERT INTO ops_system_metrics (
   db_conn_waiting,
 
   goroutine_count,
-  concurrency_queue_depth
+  concurrency_queue_depth,
+
+  heap_alloc_mb,
+  heap_sys_mb,
+  gc_count,
+  ws_active_conns,
+  ws_handshake_total
 ) VALUES (
   $1,$2,$3,$4,
   $5,$6,$7,$8,
@@ -89,7 +95,8 @@ INSERT INTO ops_system_metrics (
   $32,$33,
   $34,$35,
   $36,$37,$38,
-  $39,$40
+  $39,$40,
+  $41,$42,$43,$44,$45
 )`
 
 	_, err := r.db.ExecContext(
@@ -145,6 +152,12 @@ INSERT INTO ops_system_metrics (
 
 		opsNullInt(input.GoroutineCount),
 		opsNullInt(input.ConcurrencyQueueDepth),
+
+		opsNullInt(input.HeapAllocMB),
+		opsNullInt(input.HeapSysMB),
+		opsNullInt(input.GCCount),
+		opsNullInt(input.WSActiveConns),
+		opsNullInt(input.WSHandshakeTotal),
 	)
 	return err
 }
@@ -180,7 +193,13 @@ SELECT
 
   goroutine_count,
   concurrency_queue_depth,
-  account_switch_count
+  account_switch_count,
+
+  heap_alloc_mb,
+  heap_sys_mb,
+  gc_count,
+  ws_active_conns,
+  ws_handshake_total
 FROM ops_system_metrics
 WHERE window_minutes = $1
   AND platform IS NULL
@@ -203,6 +222,11 @@ LIMIT 1`
 	var goroutines sql.NullInt64
 	var queueDepth sql.NullInt64
 	var accountSwitchCount sql.NullInt64
+	var heapAlloc sql.NullInt64
+	var heapSys sql.NullInt64
+	var gcCount sql.NullInt64
+	var wsActive sql.NullInt64
+	var wsHandshake sql.NullInt64
 
 	if err := r.db.QueryRowContext(ctx, q, windowMinutes).Scan(
 		&out.ID,
@@ -222,6 +246,11 @@ LIMIT 1`
 		&goroutines,
 		&queueDepth,
 		&accountSwitchCount,
+		&heapAlloc,
+		&heapSys,
+		&gcCount,
+		&wsActive,
+		&wsHandshake,
 	); err != nil {
 		return nil, err
 	}
@@ -282,8 +311,123 @@ LIMIT 1`
 		v := accountSwitchCount.Int64
 		out.AccountSwitchCount = &v
 	}
+	if heapAlloc.Valid {
+		v := heapAlloc.Int64
+		out.HeapAllocMB = &v
+	}
+	if heapSys.Valid {
+		v := heapSys.Int64
+		out.HeapSysMB = &v
+	}
+	if gcCount.Valid {
+		v := int(gcCount.Int64)
+		out.GCCount = &v
+	}
+	if wsActive.Valid {
+		v := int(wsActive.Int64)
+		out.WSActiveConns = &v
+	}
+	if wsHandshake.Valid {
+		v := wsHandshake.Int64
+		out.WSHandshakeTotal = &v
+	}
 
 	return &out, nil
+}
+
+func (r *opsRepository) ListSystemMetricsSince(ctx context.Context, since time.Time) ([]*service.OpsSystemMetricsSnapshot, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("nil ops repository")
+	}
+
+	q := `
+SELECT
+  id,
+  created_at,
+  window_minutes,
+
+  memory_used_mb,
+  goroutine_count,
+
+  heap_alloc_mb,
+  heap_sys_mb,
+  gc_count,
+
+  ws_active_conns,
+  ws_handshake_total
+FROM ops_system_metrics
+WHERE created_at >= $1
+  AND platform IS NULL
+  AND group_id IS NULL
+ORDER BY created_at ASC`
+
+	rows, err := r.db.QueryContext(ctx, q, since)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]*service.OpsSystemMetricsSnapshot, 0, 256)
+	for rows.Next() {
+		var item service.OpsSystemMetricsSnapshot
+		var memUsed sql.NullInt64
+		var goroutines sql.NullInt64
+		var heapAlloc sql.NullInt64
+		var heapSys sql.NullInt64
+		var gcCount sql.NullInt64
+		var wsActive sql.NullInt64
+		var wsHandshake sql.NullInt64
+
+		if err := rows.Scan(
+			&item.ID,
+			&item.CreatedAt,
+			&item.WindowMinutes,
+			&memUsed,
+			&goroutines,
+			&heapAlloc,
+			&heapSys,
+			&gcCount,
+			&wsActive,
+			&wsHandshake,
+		); err != nil {
+			return nil, err
+		}
+
+		if memUsed.Valid {
+			v := memUsed.Int64
+			item.MemoryUsedMB = &v
+		}
+		if goroutines.Valid {
+			v := int(goroutines.Int64)
+			item.GoroutineCount = &v
+		}
+		if heapAlloc.Valid {
+			v := heapAlloc.Int64
+			item.HeapAllocMB = &v
+		}
+		if heapSys.Valid {
+			v := heapSys.Int64
+			item.HeapSysMB = &v
+		}
+		if gcCount.Valid {
+			v := int(gcCount.Int64)
+			item.GCCount = &v
+		}
+		if wsActive.Valid {
+			v := int(wsActive.Int64)
+			item.WSActiveConns = &v
+		}
+		if wsHandshake.Valid {
+			v := wsHandshake.Int64
+			item.WSHandshakeTotal = &v
+		}
+
+		out = append(out, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *opsRepository) UpsertJobHeartbeat(ctx context.Context, input *service.OpsUpsertJobHeartbeatInput) error {
