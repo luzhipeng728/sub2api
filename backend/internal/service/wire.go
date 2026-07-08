@@ -10,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/google/uuid"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 )
@@ -297,6 +298,17 @@ func ProvideOpsMetricsCollector(
 	return collector
 }
 
+// ProvideOpsVistaraCollector creates and starts OpsVistaraCollector.
+func ProvideOpsVistaraCollector(
+	opsRepo OpsRepository,
+	cfg *config.Config,
+	redisClient *redis.Client,
+) *OpsVistaraCollector {
+	collector := NewOpsVistaraCollector(opsRepo, cfg, redisClient, uuid.NewString())
+	collector.Start()
+	return collector
+}
+
 // ProvideOpsAggregationService creates and starts OpsAggregationService (hourly/daily pre-aggregation).
 func ProvideOpsAggregationService(
 	opsRepo OpsRepository,
@@ -574,6 +586,7 @@ var ProviderSet = wire.NewSet(
 	ProvideOpsSystemLogSink,
 	ProvideOpsService,
 	ProvideOpsMetricsCollector,
+	ProvideOpsVistaraCollector,
 	ProvideOpsAggregationService,
 	ProvideOpsAlertEvaluatorService,
 	ProvideOpsCleanupService,
