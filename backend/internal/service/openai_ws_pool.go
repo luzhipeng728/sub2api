@@ -539,6 +539,10 @@ type OpenAIWSPoolMetricsSnapshot struct {
 	ConnPickMsTotal         int64
 	ScaleUpTotal            int64
 	ScaleDownTotal          int64
+	// ActiveConnCount is the number of connections currently tracked across
+	// all account pools (leased + idle), computed on demand — not an
+	// incrementally-maintained counter, so it cannot drift.
+	ActiveConnCount int64
 }
 
 type openAIWSPoolMetrics struct {
@@ -596,6 +600,27 @@ func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
 	return pool
 }
 
+// activeConnCount sums len(ap.conns) across every account pool. Safe to call
+// frequently but only intended for periodic (e.g. 60s) metrics snapshots,
+// not the request hot path.
+func (p *openAIWSConnPool) activeConnCount() int64 {
+	if p == nil {
+		return 0
+	}
+	var total int64
+	p.accounts.Range(func(_, value any) bool {
+		ap, ok := value.(*openAIWSAccountPool)
+		if !ok || ap == nil {
+			return true
+		}
+		ap.mu.Lock()
+		total += int64(len(ap.conns))
+		ap.mu.Unlock()
+		return true
+	})
+	return total
+}
+
 func (p *openAIWSConnPool) SnapshotMetrics() OpenAIWSPoolMetricsSnapshot {
 	if p == nil {
 		return OpenAIWSPoolMetricsSnapshot{}
@@ -610,6 +635,7 @@ func (p *openAIWSConnPool) SnapshotMetrics() OpenAIWSPoolMetricsSnapshot {
 		ConnPickMsTotal:         p.metrics.connPickMs.Load(),
 		ScaleUpTotal:            p.metrics.scaleUpTotal.Load(),
 		ScaleDownTotal:          p.metrics.scaleDownTotal.Load(),
+		ActiveConnCount:         p.activeConnCount(),
 	}
 }
 
