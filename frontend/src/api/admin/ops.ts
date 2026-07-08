@@ -271,6 +271,13 @@ export interface OpsSystemMetricsSnapshot {
   goroutine_count?: number | null
   concurrency_queue_depth?: number | null
   account_switch_count?: number | null
+
+  heap_alloc_mb?: number | null
+  heap_sys_mb?: number | null
+  gc_count?: number | null
+
+  ws_active_conns?: number | null
+  ws_handshake_total?: number | null
 }
 
 export interface OpsJobHeartbeat {
@@ -1297,6 +1304,89 @@ async function updateMetricThresholds(thresholds: OpsMetricThresholds): Promise<
   await apiClient.put('/admin/ops/settings/metric-thresholds', thresholds)
 }
 
+// ==================== Codex Monitoring ====================
+
+export type OpsCodexWindow = '1h' | '6h' | '24h'
+
+export interface OpsCodexBlockedReason {
+  reason: string
+  count: number
+}
+
+export interface OpsVistaraCostSummary {
+  total_usd: number | null
+  since_start_usd: number | null
+  record_from: string | null
+  usd_per_minute: number | null
+  usd_per_hour: number | null
+  usd_per_day: number | null
+}
+
+export interface OpsCodexOverviewResponse {
+  since: string
+  until: string
+  total_traffic: number
+  success_count: number
+  error_429_count: number
+  blocked_count: number
+  accounts_used: number
+  rpm_1h: number
+  blocked_reasons: OpsCodexBlockedReason[]
+  vistara: OpsVistaraCostSummary | null
+}
+
+export interface OpsCodexAccountStatus {
+  account_id: number
+  name: string
+  concurrency: number
+  proxy_id: number | null
+  schedulable: boolean
+  weekly_7d_pct: number
+  hourly_5h_pct: number
+  weekly_7d_reset: string
+  success_count: number
+  error_429_count: number
+  error_other_count: number
+}
+
+// Runtime series point for the Codex memory-leak diagnostic chart. The
+// backend returns the same OpsSystemMetricsSnapshot rows used elsewhere in
+// this file (see GetCodexRuntimeSeries -> ops_repo.ListSystemMetricsSince).
+export type OpsCodexRuntimePoint = OpsSystemMetricsSnapshot
+
+export async function getCodexOverview(
+  params: { window?: OpsCodexWindow },
+  options: OpsRequestOptions = {}
+): Promise<OpsCodexOverviewResponse> {
+  const { data } = await apiClient.get<OpsCodexOverviewResponse>('/admin/ops/codex/overview', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
+export async function getCodexAccounts(
+  params: { window?: OpsCodexWindow },
+  options: OpsRequestOptions = {}
+): Promise<{ accounts: OpsCodexAccountStatus[] }> {
+  const { data } = await apiClient.get<{ accounts: OpsCodexAccountStatus[] }>('/admin/ops/codex/accounts', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
+export async function getCodexRuntimeSeries(
+  params: { hours?: number },
+  options: OpsRequestOptions = {}
+): Promise<{ series: OpsCodexRuntimePoint[] }> {
+  const { data } = await apiClient.get<{ series: OpsCodexRuntimePoint[] }>('/admin/ops/codex/runtime-series', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
 export const opsAPI = {
   getDashboardSnapshotV2,
   getDashboardOverview,
@@ -1347,7 +1437,11 @@ export const opsAPI = {
   updateMetricThresholds,
   listSystemLogs,
   cleanupSystemLogs,
-  getSystemLogSinkHealth
+  getSystemLogSinkHealth,
+
+  getCodexOverview,
+  getCodexAccounts,
+  getCodexRuntimeSeries
 }
 
 export default opsAPI
