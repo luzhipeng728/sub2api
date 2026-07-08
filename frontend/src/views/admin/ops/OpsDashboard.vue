@@ -103,6 +103,15 @@
         :refresh-token="dashboardRefreshToken"
       />
 
+      <!-- Row: Codex Monitoring -->
+      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
+        <CodexOverviewCards :overview="codexOverview" :loading="codexLoading" />
+      </div>
+      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <CodexRuntimeChart :points="codexRuntimeSeries" :loading="codexLoading" />
+        <CodexAccountsTable :accounts="codexAccounts" :loading="codexLoading" />
+      </div>
+
       <!-- Settings Dialog (hidden in fullscreen mode) -->
       <template v-if="!isFullscreen">
         <OpsSettingsDialog :show="showSettingsDialog" @close="showSettingsDialog = false" @saved="onSettingsSaved" />
@@ -150,7 +159,10 @@ import {
   type OpsErrorTrendResponse,
   type OpsLatencyHistogramResponse,
   type OpsThroughputTrendResponse,
-  type OpsMetricThresholds
+  type OpsMetricThresholds,
+  type OpsCodexOverviewResponse,
+  type OpsCodexAccountStatus,
+  type OpsCodexRuntimePoint
 } from '@/api/admin/ops'
 import { useAdminSettingsStore, useAppStore } from '@/stores'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
@@ -169,6 +181,9 @@ import OpsSystemLogTable from './components/OpsSystemLogTable.vue'
 import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from './components/OpsRequestDetailsModal.vue'
 import OpsSettingsDialog from './components/OpsSettingsDialog.vue'
 import OpsAlertRulesCard from './components/OpsAlertRulesCard.vue'
+import CodexOverviewCards from './components/CodexOverviewCards.vue'
+import CodexAccountsTable from './components/CodexAccountsTable.vue'
+import CodexRuntimeChart from './components/CodexRuntimeChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -361,6 +376,11 @@ const loadingErrorTrend = ref(false)
 
 const errorDistribution = ref<OpsErrorDistributionResponse | null>(null)
 const loadingErrorDistribution = ref(false)
+
+const codexOverview = ref<OpsCodexOverviewResponse | null>(null)
+const codexAccounts = ref<OpsCodexAccountStatus[]>([])
+const codexRuntimeSeries = ref<OpsCodexRuntimePoint[]>([])
+const codexLoading = ref(false)
 
 const selectedErrorId = ref<number | null>(null)
 const showErrorModal = ref(false)
@@ -684,6 +704,25 @@ async function refreshDeferredPanels(fetchSeq: number, signal: AbortSignal) {
   ])
 }
 
+async function fetchCodexData() {
+  if (!opsEnabled.value) return
+  codexLoading.value = true
+  try {
+    const [overviewRes, accountsRes, runtimeRes] = await Promise.all([
+      opsAPI.getCodexOverview({ window: '1h' }),
+      opsAPI.getCodexAccounts({ window: '1h' }),
+      opsAPI.getCodexRuntimeSeries({ hours: 6 })
+    ])
+    codexOverview.value = overviewRes
+    codexAccounts.value = accountsRes.accounts
+    codexRuntimeSeries.value = runtimeRes.series
+  } catch (e) {
+    console.error('[OpsDashboard] fetchCodexData failed', e)
+  } finally {
+    codexLoading.value = false
+  }
+}
+
 function isOpsDisabledError(err: unknown): boolean {
   return (
     !!err &&
@@ -723,6 +762,7 @@ async function fetchData() {
 
     // Defer non-core visual panels to reduce initial blocking.
     void refreshDeferredPanels(fetchSeq, dashboardFetchController.signal)
+    void fetchCodexData()
   } catch (err) {
     if (!isOpsDisabledError(err)) {
       console.error('[ops] failed to fetch dashboard data', err)
