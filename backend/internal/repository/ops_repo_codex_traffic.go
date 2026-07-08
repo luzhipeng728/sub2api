@@ -35,7 +35,7 @@ WITH combined AS (
   FROM ops_error_logs o
   WHERE o.created_at >= $1 AND o.created_at < $2
     AND o.platform = 'openai'
-    AND COALESCE(o.status_code, 0) >= 400
+    AND (COALESCE(o.status_code, 0) >= 400 OR o.error_type = 'cyber_policy')
     AND o.account_id IS NOT NULL
 )
 SELECT
@@ -82,7 +82,7 @@ SELECT error_type, COUNT(*) AS cnt
 FROM ops_error_logs
 WHERE created_at >= $1 AND created_at < $2
   AND platform = 'openai'
-  AND COALESCE(status_code, 0) >= 400
+  AND (COALESCE(status_code, 0) >= 400 OR error_type = 'cyber_policy')
 GROUP BY error_type
 ORDER BY cnt DESC`
 

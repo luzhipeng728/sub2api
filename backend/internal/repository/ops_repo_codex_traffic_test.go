@@ -18,7 +18,7 @@ func TestOpsRepositoryGetCodexAccountTraffic(t *testing.T) {
 	since := time.Date(2026, 7, 8, 11, 0, 0, 0, time.UTC)
 	until := since.Add(time.Hour)
 
-	mock.ExpectQuery(`(?s)WITH combined AS.*GROUP BY account_id`).
+	mock.ExpectQuery(`(?s)WITH combined AS.*COALESCE\(o\.status_code, 0\) >= 400 OR o\.error_type = 'cyber_policy'.*GROUP BY account_id`).
 		WithArgs(since, until).
 		WillReturnRows(sqlmock.NewRows([]string{"account_id", "success_count", "error_429_count", "error_other_count"}).
 			AddRow(int64(64), int64(120), int64(3), int64(1)).
@@ -42,7 +42,7 @@ func TestOpsRepositoryGetCodexBlockedReasonBreakdown(t *testing.T) {
 	since := time.Date(2026, 7, 8, 11, 0, 0, 0, time.UTC)
 	until := since.Add(time.Hour)
 
-	mock.ExpectQuery(`(?s)SELECT error_type, COUNT\(\*\) AS cnt FROM ops_error_logs`).
+	mock.ExpectQuery(`(?s)SELECT error_type, COUNT\(\*\) AS cnt FROM ops_error_logs.*COALESCE\(status_code, 0\) >= 400 OR error_type = 'cyber_policy'.*GROUP BY error_type`).
 		WithArgs(since, until).
 		WillReturnRows(sqlmock.NewRows([]string{"error_type", "cnt"}).
 			AddRow("rate_limit", int64(9)).
