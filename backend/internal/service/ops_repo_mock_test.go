@@ -126,6 +126,14 @@ func (m *opsRepoMock) ListJobHeartbeats(ctx context.Context) ([]*OpsJobHeartbeat
 	return []*OpsJobHeartbeat{}, nil
 }
 
+func (m *opsRepoMock) InsertVistaraQuotaSample(ctx context.Context, usedQuota int64) error {
+	return nil
+}
+
+func (m *opsRepoMock) GetVistaraCostSummary(ctx context.Context, now time.Time) (*OpsVistaraCostSummary, error) {
+	return &OpsVistaraCostSummary{}, nil
+}
+
 func (m *opsRepoMock) ListAlertRules(ctx context.Context) ([]*OpsAlertRule, error) {
 	return []*OpsAlertRule{}, nil
 }

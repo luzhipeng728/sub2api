@@ -39,6 +39,9 @@ type OpsRepository interface {
 	UpsertJobHeartbeat(ctx context.Context, input *OpsUpsertJobHeartbeatInput) error
 	ListJobHeartbeats(ctx context.Context) ([]*OpsJobHeartbeat, error)
 
+	InsertVistaraQuotaSample(ctx context.Context, usedQuota int64) error
+	GetVistaraCostSummary(ctx context.Context, now time.Time) (*OpsVistaraCostSummary, error)
+
 	// Alerts (rules + events)
 	ListAlertRules(ctx context.Context) ([]*OpsAlertRule, error)
 	CreateAlertRule(ctx context.Context, input *OpsAlertRule) (*OpsAlertRule, error)
@@ -301,6 +304,18 @@ type OpsSystemMetricsSnapshot struct {
 
 	WSActiveConns    *int   `json:"ws_active_conns"`
 	WSHandshakeTotal *int64 `json:"ws_handshake_total"`
+}
+
+// OpsVistaraCostSummary derives cost-burn estimates for the downstream
+// vistara resale channel from raw used_quota samples. QUOTA_PER_USD follows
+// new-api's default: 1 USD = 500000 quota.
+type OpsVistaraCostSummary struct {
+	TotalUSD      *float64   `json:"total_usd"`
+	SinceStartUSD *float64   `json:"since_start_usd"`
+	RecordFrom    *time.Time `json:"record_from"`
+	USDPerMinute  *float64   `json:"usd_per_minute"`
+	USDPerHour    *float64   `json:"usd_per_hour"`
+	USDPerDay     *float64   `json:"usd_per_day"`
 }
 
 type OpsUpsertJobHeartbeatInput struct {
