@@ -28,6 +28,11 @@ type OpsService struct {
 	accountRepo AccountRepository
 	userRepo    UserRepository
 
+	// db 由 wire 通过 SetDB 注入（见 ProvideOpsService），仅用于 GetCodexAccounts
+	// 直接查询 accounts 表的调度/配额状态字段（不在 OpsRepository 之下，
+	// 镜像旧 codex_monitor.py 脚本的做法）。避免为此单一用途扩大 OpsRepository 接口。
+	db *sql.DB
+
 	// getAccountAvailability is a unit-test hook for overriding account availability lookup.
 	getAccountAvailability func(ctx context.Context, platformFilter string, groupIDFilter *int64) (*OpsAccountAvailability, error)
 
@@ -60,6 +65,15 @@ func (s *OpsService) SetCleanupReloader(r CleanupReloader) {
 		return
 	}
 	s.cleanupReloader = r
+}
+
+// SetDB 由 wire 注入 *sql.DB（见 ProvideOpsService），供 GetCodexAccounts 直接查询
+// accounts 表使用。不走 NewOpsService 构造参数，避免级联改动其现有的大量调用方。
+func (s *OpsService) SetDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.db = db
 }
 
 // SetOpenAIQuotaAutoPauseSettingsSink 由 wire 注入，把最新的 quota auto-pause 全局默认
