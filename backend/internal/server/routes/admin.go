@@ -217,6 +217,14 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		ops.GET("/dashboard/error-trend", h.Admin.Ops.GetDashboardErrorTrend)
 		ops.GET("/dashboard/error-distribution", h.Admin.Ops.GetDashboardErrorDistribution)
 		ops.GET("/dashboard/openai-token-stats", h.Admin.Ops.GetDashboardOpenAITokenStats)
+
+		// Codex (OpenAI) monitoring
+		codex := ops.Group("/codex")
+		{
+			codex.GET("/overview", h.Admin.Ops.GetCodexOverview)
+			codex.GET("/accounts", h.Admin.Ops.GetCodexAccounts)
+			codex.GET("/runtime-series", h.Admin.Ops.GetCodexRuntimeSeries)
+		}
 	}
 }
 
