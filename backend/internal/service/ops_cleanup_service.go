@@ -303,6 +303,7 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 		{effective.ErrorLogRetentionDays, "ops_system_logs", "created_at", false, &out.systemLogs},
 		{effective.ErrorLogRetentionDays, "ops_system_log_cleanup_audits", "created_at", false, &out.logAudits},
 		{effective.MinuteMetricsRetentionDays, "ops_system_metrics", "created_at", false, &out.systemMetrics},
+		{effective.MinuteMetricsRetentionDays, "ops_vistara_quota_samples", "created_at", false, &out.vistaraQuotaSamples},
 		{effective.HourlyMetricsRetentionDays, "ops_metrics_hourly", "bucket_start", false, &out.hourlyPreagg},
 		{effective.HourlyMetricsRetentionDays, "ops_metrics_daily", "bucket_date", true, &out.dailyPreagg},
 	}
