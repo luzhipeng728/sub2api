@@ -65,6 +65,30 @@ type OpsRepository interface {
 	UpsertDailyMetrics(ctx context.Context, startTime, endTime time.Time) error
 	GetLatestHourlyBucketStart(ctx context.Context) (time.Time, bool, error)
 	GetLatestDailyBucketDate(ctx context.Context) (time.Time, bool, error)
+
+	// Codex (OpenAI) per-account traffic aggregation, for the Codex native
+	// monitoring dashboard's account-level breakdown.
+	GetCodexAccountTraffic(ctx context.Context, since, until time.Time) ([]*OpsCodexAccountTraffic, error)
+	GetCodexBlockedReasonBreakdown(ctx context.Context, since, until time.Time) ([]*OpsCodexBlockedReason, error)
+}
+
+// OpsCodexAccountTraffic is per-account request counts for the OpenAI/Codex
+// platform, aggregated from usage_logs (success) + ops_error_logs (errors)
+// over a time window. This is the dimension the generic ops dashboard is
+// missing today (it only groups by platform/group_id).
+type OpsCodexAccountTraffic struct {
+	AccountID       int64 `json:"account_id"`
+	SuccessCount    int64 `json:"success_count"`
+	Error429Count   int64 `json:"error_429_count"`
+	ErrorOtherCount int64 `json:"error_other_count"`
+}
+
+// OpsCodexBlockedReason is a count of ops_error_logs.error_type for
+// platform=openai over a time window — answers "how many were blocked, and
+// why".
+type OpsCodexBlockedReason struct {
+	Reason string `json:"reason"`
+	Count  int64  `json:"count"`
 }
 
 // DeletedKeyAuditResult 是按明文 key 反查 deleted_api_key_audits 的结果。

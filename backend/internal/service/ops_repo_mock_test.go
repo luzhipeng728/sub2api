@@ -209,4 +209,12 @@ func (m *opsRepoMock) LookupDeletedKeyAudit(ctx context.Context, key string) (*D
 	return nil, nil
 }
 
+func (m *opsRepoMock) GetCodexAccountTraffic(ctx context.Context, since, until time.Time) ([]*OpsCodexAccountTraffic, error) {
+	return []*OpsCodexAccountTraffic{}, nil
+}
+
+func (m *opsRepoMock) GetCodexBlockedReasonBreakdown(ctx context.Context, since, until time.Time) ([]*OpsCodexBlockedReason, error) {
+	return []*OpsCodexBlockedReason{}, nil
+}
+
 var _ OpsRepository = (*opsRepoMock)(nil)
