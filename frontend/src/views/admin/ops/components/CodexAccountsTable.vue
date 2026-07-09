@@ -23,29 +23,31 @@ const cols: Column[] = [
 </script>
 
 <template>
-  <div class="flex h-full flex-col rounded-3xl bg-white p-6 shadow-sm ring-1 ring-gray-900/5 dark:bg-dark-800 dark:ring-dark-700">
-    <h3 class="mb-4 text-sm font-bold text-gray-900 dark:text-white">Codex 监控 · 账号状态</h3>
-    <DataTable
-      :columns="cols"
-      :data="props.accounts"
-      :loading="props.loading"
-      row-key="account_id"
-      :estimate-row-height="48"
-    >
-      <template #cell-schedulable="{ value }">
-        <span
-          :class="[
-            'rounded-full px-2 py-0.5 text-xs font-medium',
-            value
-              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-              : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-          ]"
-        >
-          {{ value ? '启用' : '禁用' }}
-        </span>
-      </template>
-      <template #cell-weekly_7d_pct="{ value }">{{ value < 0 ? '—' : `${value}%` }}</template>
-      <template #cell-hourly_5h_pct="{ value }">{{ value < 0 ? '—' : `${value}%` }}</template>
-    </DataTable>
+  <div class="flex h-[560px] flex-col rounded-3xl bg-white p-6 shadow-sm ring-1 ring-gray-900/5 dark:bg-dark-800 dark:ring-dark-700">
+    <h3 class="mb-4 flex-none text-sm font-bold text-gray-900 dark:text-white">Codex 监控 · 账号状态</h3>
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <DataTable
+        :columns="cols"
+        :data="props.accounts"
+        :loading="props.loading"
+        row-key="account_id"
+        :estimate-row-height="48"
+      >
+        <template #cell-schedulable="{ value }">
+          <span
+            :class="[
+              'rounded-full px-2 py-0.5 text-xs font-medium',
+              value
+                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+            ]"
+          >
+            {{ value ? '启用' : '禁用' }}
+          </span>
+        </template>
+        <template #cell-weekly_7d_pct="{ value }">{{ value < 0 ? '—' : `${value}%` }}</template>
+        <template #cell-hourly_5h_pct="{ value }">{{ value < 0 ? '—' : `${value}%` }}</template>
+      </DataTable>
+    </div>
   </div>
 </template>

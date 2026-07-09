@@ -714,7 +714,9 @@ async function fetchCodexData() {
       opsAPI.getCodexRuntimeSeries({ hours: 6 })
     ])
     codexOverview.value = overviewRes
-    codexAccounts.value = accountsRes.accounts
+    // Only show schedulable accounts — most registered accounts are disabled/dormant
+    // and would otherwise blow up the table to thousands of rows.
+    codexAccounts.value = (accountsRes.accounts || []).filter((a) => a.schedulable)
     codexRuntimeSeries.value = runtimeRes.series
   } catch (e) {
     console.error('[OpsDashboard] fetchCodexData failed', e)
