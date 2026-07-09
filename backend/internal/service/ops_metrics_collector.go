@@ -926,43 +926,15 @@ func (c *OpsMetricsCollector) dbPoolStats() (active int, idle int) {
 	return stats.InUse, stats.Idle
 }
 
-var opsMetricsCollectorReleaseScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
-`)
-
 func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(), bool) {
-	if c == nil || c.redisClient == nil {
+	if c == nil {
 		return nil, true
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	ok, err := c.redisClient.SetNX(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID, opsMetricsCollectorLeaderLockTTL).Result()
-	if err != nil {
-		// Prefer fail-closed to avoid stampeding the database when Redis is flaky.
-		// Fallback to a DB advisory lock when Redis is present but unavailable.
-		release, ok := tryAcquireDBAdvisoryLock(ctx, c.db, opsMetricsCollectorAdvisoryLockID)
-		if !ok {
-			c.maybeLogSkip()
-			return nil, false
-		}
-		return release, true
-	}
+	release, ok := tryAcquireOpsLeaderLock(ctx, c.redisClient, c.db, opsMetricsCollectorLeaderLockKey, opsMetricsCollectorLeaderLockTTL, opsMetricsCollectorAdvisoryLockID, c.instanceID)
 	if !ok {
 		c.maybeLogSkip()
-		return nil, false
 	}
-
-	release := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, _ = opsMetricsCollectorReleaseScript.Run(ctx, c.redisClient, []string{opsMetricsCollectorLeaderLockKey}, c.instanceID).Result()
-	}
-	return release, true
+	return release, ok
 }
 
 func (c *OpsMetricsCollector) maybeLogSkip() {

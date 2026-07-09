@@ -70,10 +70,21 @@ func (s *OpsService) GetCodexOverview(ctx context.Context, since, until time.Tim
 	for _, t := range traffic {
 		out.SuccessCount += t.SuccessCount
 		out.Error429Count += t.Error429Count
-		out.BlockedCount += t.Error429Count + t.ErrorOtherCount
 		if t.SuccessCount > 0 || t.Error429Count > 0 || t.ErrorOtherCount > 0 {
 			out.AccountsUsed++
 		}
+	}
+	// BlockedCount is derived from the same source as BlockedReasons (rather
+	// than summed from the per-account traffic breakdown) because
+	// GetCodexAccountTraffic requires account_id IS NOT NULL and therefore
+	// can't see blocks that happen before an account is even selected (e.g.
+	// "no_available_account"). Deriving both from GetCodexBlockedReasonBreakdown
+	// keeps the headline count reconciled with the breakdown shown below it.
+	for _, b := range blocked {
+		if b == nil {
+			continue
+		}
+		out.BlockedCount += b.Count
 	}
 	out.TotalTraffic = out.SuccessCount + out.BlockedCount
 

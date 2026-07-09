@@ -33,6 +33,9 @@ type OpsVistaraCollector struct {
 	stopCh    chan struct{}
 	startOnce sync.Once
 	stopOnce  sync.Once
+
+	skipLogMu sync.Mutex
+	skipLogAt time.Time
 }
 
 func NewOpsVistaraCollector(opsRepo OpsRepository, cfg *config.Config, redisClient *redis.Client, instanceID string) *OpsVistaraCollector {
@@ -91,6 +94,19 @@ func (c *OpsVistaraCollector) collectOnce(ctx context.Context) error {
 		return nil // not configured; no-op
 	}
 
+	lockCtx, cancel := context.WithTimeout(ctx, opsVistaraCollectorTimeout)
+	release, ok := c.tryAcquireLeaderLock(lockCtx)
+	cancel()
+	if !ok {
+		// Another instance holds the lock this tick; skip to avoid every
+		// instance polling Vistara and inserting a used_quota sample, which
+		// would corrupt the cost-rate calculations in GetVistaraCostSummary.
+		return nil
+	}
+	if release != nil {
+		defer release()
+	}
+
 	usedQuota, err := c.fetchUsedQuota(ctx)
 	if err != nil {
 		return err
@@ -99,6 +115,34 @@ func (c *OpsVistaraCollector) collectOnce(ctx context.Context) error {
 		return nil
 	}
 	return c.opsRepo.InsertVistaraQuotaSample(ctx, *usedQuota)
+}
+
+// tryAcquireLeaderLock mirrors OpsMetricsCollector's leader-election pattern
+// via the shared tryAcquireOpsLeaderLock helper, so only one instance in a
+// multi-instance deployment polls Vistara and persists a quota sample per
+// tick. Fails open (nil, true) when redisClient is nil (e.g. in tests that
+// don't wire Redis), same as before this collector had any locking.
+func (c *OpsVistaraCollector) tryAcquireLeaderLock(ctx context.Context) (func(), bool) {
+	if c == nil {
+		return nil, true
+	}
+	release, ok := tryAcquireOpsLeaderLock(ctx, c.redisClient, nil, opsVistaraCollectorLeaderLockKey, opsVistaraCollectorLeaderLockTTL, opsVistaraCollectorAdvisoryLockID, c.instanceID)
+	if !ok {
+		c.maybeLogSkip()
+	}
+	return release, ok
+}
+
+func (c *OpsVistaraCollector) maybeLogSkip() {
+	c.skipLogMu.Lock()
+	defer c.skipLogMu.Unlock()
+
+	now := time.Now()
+	if !c.skipLogAt.IsZero() && now.Sub(c.skipLogAt) < time.Minute {
+		return
+	}
+	c.skipLogAt = now
+	log.Printf("[OpsVistaraCollector] leader lock held by another instance; skipping")
 }
 
 func (c *OpsVistaraCollector) fetchUsedQuota(ctx context.Context) (*int64, error) {
