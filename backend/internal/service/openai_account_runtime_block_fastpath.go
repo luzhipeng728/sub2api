@@ -25,6 +25,12 @@ const (
 	openAIOAuth429StreakThreshold = 3
 	openAIOAuth429StreakGap       = 5 * time.Minute
 	openAIOAuth429StreakLock      = 20 * time.Minute
+	// 周配额(7d)耗尽导致的 429 是确定性到 limit(短期不会恢复)：用普通短软锁(10-60s)会让
+	// 该账号反复被选中→429→累积 streak→触发 20min streak_lock，把整个候选池拖垮(雪崩枯竭)。
+	// 对这类账号改用较长软锁(明显 > StreakGap)并跳过 streak 探测：大幅减少无谓重试，
+	// 又不事实禁用(周配额有时仍有少量可用)，锁到期后仍会间歇性重试自愈。
+	openAIOAuth429WeeklyLimitThreshold = 0.95
+	openAIOAuth429WeeklyLimitLock      = 8 * time.Minute
 	// openAIWSDialFailoverCooldown: WS 握手返回账号级错误(401/403/5xx)时对该账号的冷却时长。
 	// 让坏账号(如 Cloudflare 拒绝握手 403)被短暂剔除调度并把请求 failover 到健康账号。
 	openAIWSDialFailoverCooldown = 60 * time.Second
@@ -52,6 +58,16 @@ func isOpenAIOAuthAccount(account *Account) bool {
 
 func isOpenAIAccount(account *Account) bool {
 	return account != nil && account.Platform == PlatformOpenAI
+}
+
+// isOpenAIAccountWeeklyQuotaLimited 判断账号本次 429 是否由 7d 周配额耗尽导致
+// (据最近的 codex 用量快照)。快照缺失/过期/未达阈值时返回 false，回退到普通短软锁。
+func isOpenAIAccountWeeklyQuotaLimited(account *Account, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	utilization, ok := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
+	return ok && utilization >= openAIOAuth429WeeklyLimitThreshold
 }
 
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) bool {
@@ -99,8 +115,15 @@ func (s *OpenAIGatewayService) observeOpenAIOAuth429(ctx context.Context, accoun
 		return
 	}
 	s.recordOpenAIOAuth429()
-	s.softLockOpenAIOAuth429Account(ctx, account)
-	s.bumpOpenAIOAuth429Streak(account)
+	// 周配额(7d)耗尽的 429：确定性到 limit，直接较长软锁并跳过 streak 探测，
+	// 避免短软锁反复重试累积 streak → 20min 长锁 → 候选池雪崩枯竭。
+	if isOpenAIAccountWeeklyQuotaLimited(account, time.Now()) {
+		s.BlockAccountScheduling(account, time.Now().Add(openAIOAuth429WeeklyLimitLock), "oauth_429_weekly_limit")
+		logOpenAIWSModeInfo("oauth_429_weekly_limit_lock account_id=%d lock_sec=%d", account.ID, int(openAIOAuth429WeeklyLimitLock.Seconds()))
+	} else {
+		s.softLockOpenAIOAuth429Account(ctx, account)
+		s.bumpOpenAIOAuth429Streak(account)
+	}
 	if s.rateLimitService == nil || s.rateLimitService.accountRepo == nil {
 		return
 	}

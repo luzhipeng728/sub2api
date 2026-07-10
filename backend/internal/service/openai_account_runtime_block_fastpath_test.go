@@ -102,6 +102,52 @@ func TestOpenAI429FastPath_PrewarmRuntimeSoftBlocksOAuthAccount(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
+func TestIsOpenAIAccountWeeklyQuotaLimited(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Minute).Format(time.RFC3339)
+
+	// 周配额 98% + 最近快照 → 判定为周限制
+	require.True(t, isOpenAIAccountWeeklyQuotaLimited(
+		&Account{Extra: map[string]any{"codex_7d_used_percent": 98.0, "codex_usage_updated_at": recent}}, now))
+	// 恰好达阈值 95% → 周限制
+	require.True(t, isOpenAIAccountWeeklyQuotaLimited(
+		&Account{Extra: map[string]any{"codex_7d_used_percent": 95.0, "codex_usage_updated_at": recent}}, now))
+	// 未达阈值 50% → 非周限制(临时限流)
+	require.False(t, isOpenAIAccountWeeklyQuotaLimited(
+		&Account{Extra: map[string]any{"codex_7d_used_percent": 50.0, "codex_usage_updated_at": recent}}, now))
+	// 快照过期(2 天前) → 不据此判周限制，回退短软锁
+	stale := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	require.False(t, isOpenAIAccountWeeklyQuotaLimited(
+		&Account{Extra: map[string]any{"codex_7d_used_percent": 100.0, "codex_usage_updated_at": stale}}, now))
+	// 无快照 / nil → false
+	require.False(t, isOpenAIAccountWeeklyQuotaLimited(&Account{}, now))
+	require.False(t, isOpenAIAccountWeeklyQuotaLimited(nil, now))
+}
+
+func TestOpenAI429WeeklyLimited_UsesLongLockAndSkipsStreak(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	recent := time.Now().Add(-time.Minute).Format(time.RFC3339)
+	account := &Account{
+		ID: 91, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Extra: map[string]any{"codex_7d_used_percent": 100.0, "codex_usage_updated_at": recent},
+	}
+
+	// 连续多次 429（超过 streak 阈值）：周限制账号不应触发 streak 升级，直接长锁。
+	for i := 0; i < openAIOAuth429StreakThreshold+2; i++ {
+		require.False(t, svc.handleOpenAIAccountUpstreamError(
+			context.Background(), account, http.StatusTooManyRequests, http.Header{}, nil))
+	}
+
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	// 锁时长 ≈ weekly limit(8min)，远长于普通短软锁上限(60s)，证明走了周限制长锁分支。
+	v, ok := svc.openaiAccountRuntimeBlockUntil.Load(account.ID)
+	require.True(t, ok)
+	require.Greater(t, time.Until(v.(time.Time)), openAIOAuth429SoftLockMax)
+	// 周限制账号从不进入 streak 累计（跳过 bumpOpenAIOAuth429Streak）。
+	_, streakTracked := svc.openaiAccount429Streak.Load(account.ID)
+	require.False(t, streakTracked)
+}
+
 func TestOpenAI429SoftLockDuration_ScalesWithAvailableAccounts(t *testing.T) {
 	require.Equal(t, 10*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(0))
 	require.Equal(t, 10*time.Second, openAIOAuth429SoftLockDurationForAvailableAccounts(100))
